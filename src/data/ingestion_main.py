@@ -31,6 +31,7 @@ from src.data.dex_quote import DexPriceReader, DexQuote
 from src.data.gas_oracle import GasOracle, GasReading
 from src.features.obi import ObiTracker
 from src.storage import arb_store
+from src.strategy.detector_main import DetectorState, detector_loop
 from src.utils import config
 
 log = logging.getLogger("arb.ingestion")
@@ -76,6 +77,7 @@ class BatchBuffer:
 
 
 async def _bybit_consumer(buffer: BatchBuffer, stop: asyncio.Event,
+                          state: DetectorState | None = None,
                           on_snap=None) -> None:
     trackers = {pair: ObiTracker() for pair in config.PILOT_PAIRS}
     stream = BybitL2Stream(list(config.PILOT_PAIRS))
@@ -87,6 +89,8 @@ async def _bybit_consumer(buffer: BatchBuffer, stop: asyncio.Event,
                 break
             tracker = trackers[snap.symbol]
             obi = tracker.push_book(snap.as_dict())
+            best_bid = snap.bids[0][0] if snap.bids else 0.0
+            best_ask = snap.asks[0][0] if snap.asks else 0.0
             row = {
                 "ts": _utc_iso(snap.ts_ms),
                 "pair": snap.symbol,
@@ -98,10 +102,19 @@ async def _bybit_consumer(buffer: BatchBuffer, stop: asyncio.Event,
                 "levels_used": obi.levels_used,
                 "update_id": snap.update_id,
                 "is_full_snapshot": snap.is_full_snapshot,
-                "best_bid": snap.bids[0][0] if snap.bids else 0.0,
-                "best_ask": snap.asks[0][0] if snap.asks else 0.0,
+                "best_bid": best_bid,
+                "best_ask": best_ask,
             }
             buffer.add("obi_snapshots", snap.symbol, row)
+            if state is not None:
+                await state.update_obi(snap.symbol, {
+                    "weighted_obi": obi.weighted_obi,
+                    "obi_delta": obi.obi_delta,
+                    "cancellation_rate": obi.cancellation_rate,
+                    "best_bid": best_bid,
+                    "best_ask": best_ask,
+                    "ts_ms": snap.ts_ms,
+                })
             if on_snap:
                 on_snap(snap, obi)
 
@@ -112,7 +125,8 @@ async def _bybit_consumer(buffer: BatchBuffer, stop: asyncio.Event,
 
 
 async def _dex_consumer(buffer: BatchBuffer, stop: asyncio.Event,
-                        api_key: str | None) -> None:
+                        api_key: str | None,
+                        state: DetectorState | None = None) -> None:
     """api_key kept for signature compatibility; Phase 1 uses on-chain slot0()."""
     reader = DexPriceReader()
     await reader.start()
@@ -131,6 +145,12 @@ async def _dex_consumer(buffer: BatchBuffer, stop: asyncio.Event,
                 "source": q.source,
             }
             buffer.add("dex_quotes", q.pair, row)
+            if state is not None:
+                await state.update_dex(q.pair, {
+                    "mid_price": q.mid_price,
+                    "fee_bps": q.fee_bps,
+                    "ts_ms": q.ts_ms,
+                })
 
     try:
         await _run()
@@ -138,13 +158,15 @@ async def _dex_consumer(buffer: BatchBuffer, stop: asyncio.Event,
         await reader.stop()
 
 
-async def _gas_consumer(buffer: BatchBuffer, stop: asyncio.Event) -> None:
+async def _gas_consumer(buffer: BatchBuffer, stop: asyncio.Event,
+                        state: DetectorState | None = None) -> None:
     oracle = GasOracle()
     await oracle.start()
     try:
+        last_block = -1
         while not stop.is_set():
             r: GasReading | None = oracle.latest()
-            if r is not None:
+            if r is not None and r.block_number != last_block:
                 row = {
                     "ts": _utc_iso(r.ts_ms),
                     "block_number": r.block_number,
@@ -153,6 +175,15 @@ async def _gas_consumer(buffer: BatchBuffer, stop: asyncio.Event) -> None:
                     "total_gas_price_gwei": r.total_gas_price_gwei,
                 }
                 buffer.add("gas_history", "BASE", row)
+                last_block = r.block_number
+                if state is not None:
+                    await state.update_gas({
+                        "block_number": r.block_number,
+                        "base_fee_gwei": r.base_fee_gwei,
+                        "priority_fee_gwei": r.priority_fee_gwei,
+                        "total_gas_price_gwei": r.total_gas_price_gwei,
+                        "ts_ms": r.ts_ms,
+                    })
             try:
                 await asyncio.wait_for(stop.wait(), timeout=config.GAS_POLL_INTERVAL_S)
             except asyncio.TimeoutError:
@@ -189,6 +220,7 @@ async def main_async(duration_s: float | None = None,
 
     stop = asyncio.Event()
     buffer = BatchBuffer()
+    state = DetectorState()
 
     def _signal(*_):
         log.info("signal received, stopping...")
@@ -200,10 +232,11 @@ async def main_async(duration_s: float | None = None,
             loop.add_signal_handler(s, _signal)
 
     tasks = [
-        asyncio.create_task(_bybit_consumer(buffer, stop), name="bybit"),
-        asyncio.create_task(_dex_consumer(buffer, stop, dex_api_key), name="dex"),
-        asyncio.create_task(_gas_consumer(buffer, stop), name="gas"),
+        asyncio.create_task(_bybit_consumer(buffer, stop, state=state), name="bybit"),
+        asyncio.create_task(_dex_consumer(buffer, stop, dex_api_key, state=state), name="dex"),
+        asyncio.create_task(_gas_consumer(buffer, stop, state=state), name="gas"),
         asyncio.create_task(_flusher(buffer, stop), name="flusher"),
+        asyncio.create_task(detector_loop(state, stop), name="detector"),
     ]
 
     try:
@@ -222,10 +255,11 @@ async def main_async(duration_s: float | None = None,
             pid_file.unlink(missing_ok=True)
         except Exception:
             pass
-        log.info("ingestion stopped. obi_rows=%d dex_rows=%d gas_rows=%d",
+        log.info("ingestion stopped. obi_rows=%d dex_rows=%d gas_rows=%d opp_rows=%d",
                  arb_store.row_count("obi_snapshots"),
                  arb_store.row_count("dex_quotes"),
-                 arb_store.row_count("gas_history"))
+                 arb_store.row_count("gas_history"),
+                 arb_store.row_count("opportunities"))
 
 
 def cli_main() -> int:

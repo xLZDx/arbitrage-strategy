@@ -167,11 +167,11 @@ def test_spread_computes_bps_correctly() -> None:
     spreads = {s["pair"]: s for s in body["spreads"]}
     # BTC: bybit_mid = (81002+81003)/2 = 81002.5; dex = 80999
     # (81002.5 - 80999) / 81002.5 * 10000 ≈ 0.43 bps
-    assert "BTCUSDT" in spreads
+    assert "BTCUSDT" in spreads, f"expected BTCUSDT in {list(spreads)}"
     btc = spreads["BTCUSDT"]
-    assert btc["bybit_mid"] == 81002.5
-    assert btc["dex_mid"] == 80999.0
-    assert 0 < btc["spread_bps"] < 1.0
+    assert btc["bybit_mid"] == 81002.5, f"expected 81002.5, got {btc['bybit_mid']!r}; full row={btc!r}"
+    assert btc["dex_mid"] == 80999.0, f"expected 80999.0, got {btc['dex_mid']!r}"
+    assert 0 < btc["spread_bps"] < 1.0, f"spread_bps out of range: {btc['spread_bps']}"
     # ETH: dex_mid is None → spread_bps None
     assert spreads["ETHUSDT"]["dex_mid"] is None
     assert spreads["ETHUSDT"]["spread_bps"] is None

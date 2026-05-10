@@ -61,14 +61,35 @@ INDEX_HTML = """<!doctype html>
   </tr></thead>
   <tbody></tbody>
 </table>
+<h2>Phase 2 — opportunity feed</h2>
+<p class="meta">cumulative would-have-been PnL: <span id="pnl-total" class="pos">0</span> USD &middot;
+   GO: <span id="go-count">0</span> &middot;
+   SKIP: <span id="skip-count">0</span></p>
+<table id="pnl-by-pair">
+  <thead><tr>
+    <th class="pair">pair</th><th>GO</th><th>SKIP</th>
+    <th>cum USD</th><th>avg net bps</th>
+  </tr></thead>
+  <tbody></tbody>
+</table>
+<table id="opp-table">
+  <thead><tr>
+    <th class="pair">ts</th><th class="pair">pair</th><th class="pair">decision</th>
+    <th class="pair">reason</th><th>net bps</th><th>$ pnl</th>
+    <th>obi</th><th>cancel</th>
+  </tr></thead>
+  <tbody></tbody>
+</table>
 <h2 class="meta">raw /api/arb/spread</h2>
 <pre id="raw"></pre>
 <script>
 async function refresh() {
-  const [h, s, g] = await Promise.all([
+  const [h, s, g, opp, pnl] = await Promise.all([
     fetch('/api/arb/health').then(r => r.json()),
     fetch('/api/arb/spread').then(r => r.json()),
     fetch('/api/arb/gas').then(r => r.json()),
+    fetch('/api/arb/opportunities?n=30').then(r => r.json()),
+    fetch('/api/arb/pnl_simulated').then(r => r.json()),
   ]);
   document.getElementById('mode').textContent = h.mode;
   document.getElementById('ingest').textContent =
@@ -89,6 +110,43 @@ async function refresh() {
       <td class="${cls}">${row.spread_bps ?? '?'}</td>
       <td class="meta">${(row.bybit_ts ?? '').slice(11,19)}</td>`;
     tbody.appendChild(tr);
+  }
+  // PnL summary
+  document.getElementById('pnl-total').textContent =
+    (pnl.cumulative ?? 0).toFixed(4);
+  document.getElementById('pnl-total').className =
+    (pnl.cumulative ?? 0) >= 0 ? 'pos' : 'neg';
+  document.getElementById('go-count').textContent = pnl.go_count ?? 0;
+  document.getElementById('skip-count').textContent = pnl.skip_count ?? 0;
+  const ptbody = document.querySelector('#pnl-by-pair tbody');
+  ptbody.innerHTML = '';
+  for (const row of (pnl.by_pair || [])) {
+    const tr = document.createElement('tr');
+    const cls = row.cumulative_usd >= 0 ? 'pos' : 'neg';
+    tr.innerHTML = `
+      <td class="pair">${row.pair}</td>
+      <td>${row.go_count}</td>
+      <td>${row.skip_count}</td>
+      <td class="${cls}">${row.cumulative_usd.toFixed(4)}</td>
+      <td>${row.avg_go_net_bps.toFixed(2)}</td>`;
+    ptbody.appendChild(tr);
+  }
+  // Opportunity feed
+  const otbody = document.querySelector('#opp-table tbody');
+  otbody.innerHTML = '';
+  for (const row of (opp.opportunities || [])) {
+    const tr = document.createElement('tr');
+    const cls = row.decision === 'GO' ? 'pos' : 'neg';
+    tr.innerHTML = `
+      <td class="meta pair">${(row.ts ?? '').slice(11,19)}</td>
+      <td class="pair">${row.pair}</td>
+      <td class="pair ${cls}">${row.decision}</td>
+      <td class="pair meta">${row.reason}</td>
+      <td>${(row.expected_net_bps ?? 0).toFixed(2)}</td>
+      <td>${(row.theoretical_pnl_usd ?? 0).toFixed(4)}</td>
+      <td>${(row.weighted_obi ?? 0).toFixed(3)}</td>
+      <td>${(row.cancellation_rate ?? 0).toFixed(2)}</td>`;
+    otbody.appendChild(tr);
   }
   document.getElementById('raw').textContent = JSON.stringify(s, null, 2);
 }

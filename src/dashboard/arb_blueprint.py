@@ -173,6 +173,94 @@ def obi_history(pair: str):
     return jsonify({"pair": pair, "snapshots": snapshots})
 
 
+@bp.route("/opportunities", methods=["GET"])
+def opportunities():
+    """
+    Phase 2 opportunity feed.
+
+    Query params:
+      n        — max rows (default 50, max 500)
+      decision — optional "GO" or "SKIP" filter
+      pair     — optional pair filter
+    """
+    if not arb_store.table_exists("opportunities"):
+        return jsonify({"opportunities": [], "note": "no data yet"})
+    n = max(1, min(int(request.args.get("n", 50)), 500))
+    decision = request.args.get("decision")
+    pair = request.args.get("pair")
+    where = []
+    if decision in ("GO", "SKIP"):
+        where.append(f"decision = '{decision}'")
+    if pair and pair.upper() in config.PILOT_PAIRS:
+        where.append(f"pair = '{pair.upper()}'")
+    where_sql = (" WHERE " + " AND ".join(where)) if where else ""
+
+    glob = (arb_store.table_dir("opportunities") / "**" / "*.parquet").as_posix()
+    sql = f"""
+        SELECT ts, pair, decision, reason, direction,
+               spread_bps, gross_bps, expected_net_bps,
+               theoretical_pnl_usd, gas_cost_bps, slippage_haircut_bps,
+               weighted_obi, cancellation_rate
+        FROM read_parquet('{glob}', hive_partitioning=1)
+        {where_sql}
+        ORDER BY ts DESC
+        LIMIT {n}
+    """
+    rows = arb_store.query(sql)
+    keys = ("ts", "pair", "decision", "reason", "direction",
+            "spread_bps", "gross_bps", "expected_net_bps",
+            "theoretical_pnl_usd", "gas_cost_bps", "slippage_haircut_bps",
+            "weighted_obi", "cancellation_rate")
+    return jsonify({"opportunities": [dict(zip(keys, r)) for r in rows]})
+
+
+@bp.route("/pnl_simulated", methods=["GET"])
+def pnl_simulated():
+    """
+    Cumulative would-have-been PnL across all GO opportunities.
+
+    Phase 2 = sum(theoretical_pnl_usd) where decision='GO'.
+    Phase 3 simulator will replace this with realistic fills + slippage.
+    """
+    if not arb_store.table_exists("opportunities"):
+        return jsonify({"cumulative": 0.0, "go_count": 0, "skip_count": 0,
+                        "by_pair": []})
+    glob = (arb_store.table_dir("opportunities") / "**" / "*.parquet").as_posix()
+    summary_sql = f"""
+        SELECT
+            COUNT(*) FILTER (WHERE decision = 'GO') as go_count,
+            COUNT(*) FILTER (WHERE decision = 'SKIP') as skip_count,
+            COALESCE(SUM(theoretical_pnl_usd) FILTER (WHERE decision = 'GO'), 0.0)
+              as cumulative
+        FROM read_parquet('{glob}', hive_partitioning=1)
+    """
+    pair_sql = f"""
+        SELECT pair,
+               COUNT(*) FILTER (WHERE decision = 'GO') as go_count,
+               COUNT(*) FILTER (WHERE decision = 'SKIP') as skip_count,
+               COALESCE(SUM(theoretical_pnl_usd) FILTER (WHERE decision = 'GO'), 0.0)
+                 as cumulative,
+               COALESCE(AVG(expected_net_bps) FILTER (WHERE decision = 'GO'), 0.0)
+                 as avg_go_net_bps
+        FROM read_parquet('{glob}', hive_partitioning=1)
+        GROUP BY pair
+        ORDER BY pair
+    """
+    summary = arb_store.query(summary_sql)[0]
+    pair_rows = arb_store.query(pair_sql)
+    return jsonify({
+        "cumulative": round(float(summary[2]), 4),
+        "go_count": int(summary[0]),
+        "skip_count": int(summary[1]),
+        "by_pair": [
+            {"pair": r[0], "go_count": int(r[1]), "skip_count": int(r[2]),
+             "cumulative_usd": round(float(r[3]), 4),
+             "avg_go_net_bps": round(float(r[4]), 4)}
+            for r in pair_rows
+        ],
+    })
+
+
 @bp.route("/gas", methods=["GET"])
 def gas_latest():
     if not arb_store.table_exists("gas_history"):
