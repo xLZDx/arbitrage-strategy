@@ -1,6 +1,25 @@
 # Arbitrage Strategy — Production Plan (v2)
 
-**Status:** PENDING APPROVAL — all Q1–Q6 answered, plan revised. Awaiting explicit "approved/go/yes" + double-confirm before any implementation.
+**Status:** ALL PHASES IMPLEMENTED IN SHADOW (as of 2026-05-11). 322 regression assertions across 24 test files, 0 failures.
+
+| Phase | Status | Notes |
+|---|---|---|
+| 0  Bootstrap | DONE | repo, plan, settings, regression scaffold |
+| 1  Read-only market plumbing | DONE | Bybit L2 WS + Uniswap V3 + gas oracle, 24h soak pending observation |
+| 2  Opportunity detector | DONE | rule-based, integrated into ingestion, dashboard cards |
+| 3  Replay simulator | DONE | inventory + cost stack + sim_trades, kill-criterion gate ready |
+| 4  Risk + ops | DONE | HALT 0.2ms, drill 8/8 pass, /api/arb/risk |
+| 5  Execution + MEV-lite | DONE (SHADOW) | live calldata + signing pending wallet/keys |
+| 6  HistGBT classifier | DONE | feature pipeline + trainer + veto integration |
+| 7  TFT-as-feature | DONE | Stub + heuristic + sister-loader skeleton |
+| 8  Multi-relay broadcast | DONE | parallel submission + per-relay stats |
+| 9  GoPlus security scanner | DONE (dormant) | activates outside MAJORS_ALLOWLIST |
+| 10  Drift detector | DONE | per-feature KL + cooldown + alert log |
+| 11  Paper-trade hardener | DONE | sim-vs-coord gap tracker, 15% threshold |
+| 12  Live ramp guard | DONE | gates ARB_MAINNET_GATE + drill freshness + soak |
+| 13  DRL navigator | STUB (deferred per Q1) | Dummy + HoldOnHighGas; PPO is Phase 13.X |
+
+Live ingestion + dashboard wired and tested in SHADOW. Live execution requires user-provided BYBIT_TESTNET_API_KEY/SECRET + BASE_WALLET_PRIVATE_KEY (Phase 5.X).
 **Project root:** `D:\test 2\arbitrage_strategy\`
 **Source spec:** `arbitrage.txt` (root of this project)
 **Reuse source:** `D:\test 2\AI trading assistance\` (existing trading bot)

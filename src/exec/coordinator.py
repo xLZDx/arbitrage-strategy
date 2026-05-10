@@ -34,6 +34,8 @@ from src.exec.bybit_leg import BybitLegExecutor, Fill, make_client_order_id
 from src.exec.bundle_simulator import BundleSimulator, SimulationResult
 from src.exec.dex_leg import DexLegExecutor, PreparedSwap
 from src.exec.private_rpc_router import PrivateRpcRouter, SubmissionResult
+from src.ml.feature_pipeline import extract_features
+from src.ml.hist_gbt import HistGBTArtifact, load_artifact
 from src.risk import limits as risk
 from src.sim.inventory import Inventory, PAIR_LEGS
 from src.utils import config
@@ -68,6 +70,8 @@ class TradeRecord:
     sim_passed: bool = False
     sim_gas_used: int = 0
     realized_net_bps: float = 0.0
+    histgbt_p: float | None = None        # P(profitable) from HistGBT
+    histgbt_vetoed: bool = False
 
 
 def _new_trade_id() -> str:
@@ -92,6 +96,9 @@ class ArbCoordinator:
     simulator: BundleSimulator = field(default_factory=BundleSimulator)
     inventory: Inventory = field(default_factory=Inventory)
     risk_state: risk.RiskState = field(default_factory=risk.RiskState)
+    # HistGBT artifact (optional — None means classifier veto disabled)
+    histgbt: HistGBTArtifact | None = None
+    histgbt_required: bool = False  # if True, missing model → REJECT
 
     def attempt(
         self,
@@ -133,6 +140,25 @@ class ArbCoordinator:
         if not ok:
             rec.outcome = "rejected_inventory"
             rec.reason = why
+            return rec
+
+        # 2.5 HistGBT veto (Phase 6)
+        if self.histgbt is not None:
+            try:
+                feats = extract_features(opportunity)
+                vetoed, p = self.histgbt.veto(feats.reshape(1, -1))
+                rec.histgbt_p = round(p, 6)
+                rec.histgbt_vetoed = vetoed
+                if vetoed:
+                    rec.outcome = "rejected_preflight"
+                    rec.reason = (f"histgbt_veto: p={p:.4f} < "
+                                  f"threshold={self.histgbt.veto_threshold}")
+                    return rec
+            except Exception as e:
+                log.warning("HistGBT scoring failed (continuing): %s", e)
+        elif self.histgbt_required:
+            rec.outcome = "rejected_preflight"
+            rec.reason = "histgbt_required_but_missing"
             return rec
 
         # 3. Build + simulate DEX leg (mandatory simulate per Q1)

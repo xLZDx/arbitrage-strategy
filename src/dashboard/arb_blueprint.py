@@ -261,6 +261,26 @@ def pnl_simulated():
     })
 
 
+@bp.route("/model_status", methods=["GET"])
+def model_status():
+    """Phase 6 — HistGBT artifact metadata."""
+    from src.ml.hist_gbt import load_artifact
+    art = load_artifact()
+    if art is None:
+        return jsonify({"loaded": False,
+                        "note": "no model found; train via scripts/run_train_histgbt.py"})
+    return jsonify({
+        "loaded": True,
+        "trained_at": art.trained_at,
+        "holdout_auc": art.holdout_auc,
+        "n_train": art.n_train,
+        "n_holdout": art.n_holdout,
+        "pos_rate_train": art.pos_rate_train,
+        "veto_threshold": art.veto_threshold,
+        "feature_columns": list(art.feature_columns),
+    })
+
+
 @bp.route("/risk", methods=["GET"])
 def risk_state():
     """Phase 4 — current risk state + pre-flight gate result."""
