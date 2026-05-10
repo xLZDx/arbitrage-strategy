@@ -80,17 +80,56 @@ INDEX_HTML = """<!doctype html>
   </tr></thead>
   <tbody></tbody>
 </table>
+<h2>Phase 3 — replay simulator</h2>
+<p class="meta">filled <span id="sim-filled">0</span> / <span id="sim-total">0</span> &middot;
+   inv-rejected <span id="sim-rejected">0</span> &middot;
+   hit rate <span id="sim-hit">0%</span> &middot;
+   cum PnL <span id="sim-cum" class="pos">$0</span> &middot;
+   realized vs theoretical: <span id="sim-gap">0</span> bps</p>
+<table id="sim-by-pair">
+  <thead><tr>
+    <th class="pair">pair</th><th>filled</th>
+    <th>cum USD</th><th>avg realized bps</th>
+  </tr></thead>
+  <tbody></tbody>
+</table>
+
 <h2 class="meta">raw /api/arb/spread</h2>
 <pre id="raw"></pre>
 <script>
 async function refresh() {
-  const [h, s, g, opp, pnl] = await Promise.all([
+  const [h, s, g, opp, pnl, sim] = await Promise.all([
     fetch('/api/arb/health').then(r => r.json()),
     fetch('/api/arb/spread').then(r => r.json()),
     fetch('/api/arb/gas').then(r => r.json()),
     fetch('/api/arb/opportunities?n=30').then(r => r.json()),
     fetch('/api/arb/pnl_simulated').then(r => r.json()),
+    fetch('/api/arb/sim_summary').then(r => r.json()),
   ]);
+  // Sim summary
+  document.getElementById('sim-total').textContent = sim.n_trades ?? 0;
+  document.getElementById('sim-filled').textContent = sim.n_filled ?? 0;
+  document.getElementById('sim-rejected').textContent = sim.n_inventory_rejected ?? 0;
+  document.getElementById('sim-hit').textContent =
+    ((sim.hit_rate ?? 0) * 100).toFixed(1) + '%';
+  const cum = sim.cumulative_pnl_usd ?? 0;
+  const cumEl = document.getElementById('sim-cum');
+  cumEl.textContent = '$' + cum.toFixed(4);
+  cumEl.className = cum >= 0 ? 'pos' : 'neg';
+  document.getElementById('sim-gap').textContent =
+    (sim.realized_vs_theoretical_gap_bps ?? 0).toFixed(2);
+  const stbody = document.querySelector('#sim-by-pair tbody');
+  stbody.innerHTML = '';
+  for (const row of (sim.by_pair || [])) {
+    const tr = document.createElement('tr');
+    const cls = row.cumulative_usd >= 0 ? 'pos' : 'neg';
+    tr.innerHTML = `
+      <td class="pair">${row.pair}</td>
+      <td>${row.n_filled}</td>
+      <td class="${cls}">${row.cumulative_usd.toFixed(4)}</td>
+      <td>${row.avg_realized_net_bps.toFixed(2)}</td>`;
+    stbody.appendChild(tr);
+  }
   document.getElementById('mode').textContent = h.mode;
   document.getElementById('ingest').textContent =
     h.ingestion_running ? `running (pid ${h.ingestion_pid})` : 'NOT RUNNING';

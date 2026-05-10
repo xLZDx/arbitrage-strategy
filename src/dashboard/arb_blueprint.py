@@ -261,6 +261,94 @@ def pnl_simulated():
     })
 
 
+@bp.route("/sim_trades", methods=["GET"])
+def sim_trades():
+    """Phase 3 simulator output. Latest N replayed trades."""
+    if not arb_store.table_exists("sim_trades"):
+        return jsonify({"trades": [], "note": "no replay output yet"})
+    n = max(1, min(int(request.args.get("n", 50)), 500))
+    pair = request.args.get("pair")
+    where = []
+    if pair and pair.upper() in config.PILOT_PAIRS:
+        where.append(f"pair = '{pair.upper()}'")
+    where_sql = (" WHERE " + " AND ".join(where)) if where else ""
+
+    glob = (arb_store.table_dir("sim_trades") / "**" / "*.parquet").as_posix()
+    sql = f"""
+        SELECT ts, pair, direction, notional_usd, spread_bps,
+               expected_net_bps, realized_slippage_bps, realized_pnl_usd,
+               realized_net_bps, fill_pct, inventory_ok, inventory_reason,
+               portfolio_usd_after
+        FROM read_parquet('{glob}', hive_partitioning=1)
+        {where_sql}
+        ORDER BY ts DESC
+        LIMIT {n}
+    """
+    rows = arb_store.query(sql)
+    keys = ("ts", "pair", "direction", "notional_usd", "spread_bps",
+            "expected_net_bps", "realized_slippage_bps", "realized_pnl_usd",
+            "realized_net_bps", "fill_pct", "inventory_ok", "inventory_reason",
+            "portfolio_usd_after")
+    return jsonify({"trades": [dict(zip(keys, r)) for r in rows]})
+
+
+@bp.route("/sim_summary", methods=["GET"])
+def sim_summary():
+    """
+    Phase 3 backtest summary: cumulative PnL, hit rate, sim-vs-theoretical
+    gap. The Sharpe number gates the project per CLAUDE.md kill criterion.
+    """
+    if not arb_store.table_exists("sim_trades"):
+        return jsonify({
+            "n_trades": 0, "n_filled": 0, "n_inventory_rejected": 0,
+            "cumulative_pnl_usd": 0.0, "hit_rate": 0.0,
+            "avg_realized_net_bps": 0.0,
+            "avg_theoretical_net_bps": 0.0,
+            "realized_vs_theoretical_gap_bps": 0.0,
+            "by_pair": [],
+        })
+    glob = (arb_store.table_dir("sim_trades") / "**" / "*.parquet").as_posix()
+    summary_sql = f"""
+        SELECT
+            COUNT(*) AS n,
+            COUNT(*) FILTER (WHERE inventory_ok AND fill_pct > 0) AS n_filled,
+            COUNT(*) FILTER (WHERE NOT inventory_ok) AS n_rejected,
+            COALESCE(SUM(realized_pnl_usd), 0.0) AS cum_pnl,
+            COALESCE(AVG(realized_net_bps) FILTER (WHERE inventory_ok AND fill_pct > 0), 0.0) AS avg_real,
+            COALESCE(AVG(expected_net_bps) FILTER (WHERE inventory_ok AND fill_pct > 0), 0.0) AS avg_exp,
+            COALESCE(COUNT(*) FILTER (WHERE inventory_ok AND fill_pct > 0 AND realized_pnl_usd > 0)
+                * 1.0 / NULLIF(COUNT(*) FILTER (WHERE inventory_ok AND fill_pct > 0), 0), 0.0)
+                AS hit_rate
+        FROM read_parquet('{glob}', hive_partitioning=1)
+    """
+    by_pair_sql = f"""
+        SELECT pair,
+               COUNT(*) FILTER (WHERE inventory_ok AND fill_pct > 0) AS n_filled,
+               COALESCE(SUM(realized_pnl_usd), 0.0) AS cum_pnl,
+               COALESCE(AVG(realized_net_bps) FILTER (WHERE inventory_ok AND fill_pct > 0), 0.0) AS avg_real
+        FROM read_parquet('{glob}', hive_partitioning=1)
+        GROUP BY pair ORDER BY pair
+    """
+    s = arb_store.query(summary_sql)[0]
+    pair_rows = arb_store.query(by_pair_sql)
+    return jsonify({
+        "n_trades": int(s[0]),
+        "n_filled": int(s[1]),
+        "n_inventory_rejected": int(s[2]),
+        "cumulative_pnl_usd": round(float(s[3]), 4),
+        "hit_rate": round(float(s[6]), 4),
+        "avg_realized_net_bps": round(float(s[4]), 4),
+        "avg_theoretical_net_bps": round(float(s[5]), 4),
+        "realized_vs_theoretical_gap_bps": round(float(s[4]) - float(s[5]), 4),
+        "by_pair": [
+            {"pair": r[0], "n_filled": int(r[1]),
+             "cumulative_usd": round(float(r[2]), 4),
+             "avg_realized_net_bps": round(float(r[3]), 4)}
+            for r in pair_rows
+        ],
+    })
+
+
 @bp.route("/gas", methods=["GET"])
 def gas_latest():
     if not arb_store.table_exists("gas_history"):
