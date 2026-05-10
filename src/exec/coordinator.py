@@ -33,6 +33,7 @@ from src.data.dex_quote import PILOT_POOLS
 from src.exec.bybit_leg import BybitLegExecutor, Fill, make_client_order_id
 from src.exec.bundle_simulator import BundleSimulator, SimulationResult
 from src.exec.dex_leg import DexLegExecutor, PreparedSwap
+from src.exec.flashbots_executor import FlashbotsExecutor
 from src.exec.private_rpc_router import PrivateRpcRouter, SubmissionResult
 from src.ml.feature_pipeline import extract_features
 from src.ml.hist_gbt import HistGBTArtifact, load_artifact
@@ -99,6 +100,12 @@ class ArbCoordinator:
     # HistGBT artifact (optional — None means classifier veto disabled)
     histgbt: HistGBTArtifact | None = None
     histgbt_required: bool = False  # if True, missing model → REJECT
+    # Phase 5.X: live signer + submitter. Lazily constructed.
+    flashbots: FlashbotsExecutor | None = None
+
+    def __post_init__(self) -> None:
+        if self.flashbots is None:
+            self.flashbots = FlashbotsExecutor(router=self.router)
 
     def attempt(
         self,
@@ -205,21 +212,9 @@ class ArbCoordinator:
         rec.bybit_avg_price = bybit_fill.avg_price
         rec.bybit_client_order_id = bybit_fill.client_order_id
 
-        # In SHADOW the DEX side is just a mock submission; in TESTNET/MAINNET
-        # we'd sign the prepared tx and submit. Phase 5 SHADOW path is enough
-        # for end-to-end testing; live signing lands in Phase 5.X with the
-        # PoolConfig token-address extension.
-        if mode == config.MODE_SHADOW:
-            mock_signed = "0x" + "00" * 100
-            submission = self.router.submit_signed_tx(mock_signed)
-        else:
-            # TESTNET/MAINNET: prepared.data_hex is real but signing requires
-            # a private key + nonce — Phase-5.X follow-up.
-            submission = SubmissionResult(
-                tx_hash=None, relay=self.router.relay_url,
-                submitted_at_ts=time.time(), status="error",
-                error="live_signing_not_implemented_phase_5x",
-            )
+        # FlashbotsExecutor signs (deterministic mock in SHADOW; real wallet
+        # signing in TESTNET/MAINNET) and submits via the configured router.
+        submission = self.flashbots.sign_and_submit(prepared)
         rec.dex_relay = submission.relay
         rec.dex_tx_hash = submission.tx_hash
         rec.dex_status = submission.status

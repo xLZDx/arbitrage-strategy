@@ -19,6 +19,7 @@ import secrets
 from dataclasses import dataclass
 
 from src.exec.private_rpc_router import PrivateRpcRouter, SubmissionResult
+from src.exec.wallet_signer import WalletSigner
 from src.utils import config
 
 log = logging.getLogger(__name__)
@@ -26,38 +27,46 @@ log = logging.getLogger(__name__)
 
 @dataclass
 class FlashbotsExecutor:
+    """Signs PreparedSwap → submits via PrivateRpcRouter."""
     router: PrivateRpcRouter
+    signer: WalletSigner | None = None
     mode: str | None = None
     wallet_private_key_env: str = "BASE_WALLET_PRIVATE_KEY"
 
     def __post_init__(self) -> None:
         if self.mode is None:
             self.mode = self.router.mode
+        if self.signer is None:
+            self.signer = WalletSigner(
+                mode=self.mode,
+                private_key_env=self.wallet_private_key_env,
+            )
 
     def sign_and_submit(self, prepared_swap, nonce: int | None = None) -> SubmissionResult:
         """
         Signs the prepared swap with the wallet key and submits via the
         configured router.
 
-        SHADOW: returns mock submission, no signing.
-        TESTNET/MAINNET: requires BASE_WALLET_PRIVATE_KEY env var. Lifted
-        per-call (NOT cached) so a key rotation takes effect immediately.
+        SHADOW: signer returns deterministic mock hex; router returns
+                "shadow" SubmissionResult with mock tx_hash.
+        TESTNET/MAINNET: signer needs BASE_WALLET_PRIVATE_KEY env var;
+                         router submits via Flashbots Protect / public RPC.
         """
-        if self.mode == config.MODE_SHADOW:
-            return self.router.submit_signed_tx("0x" + secrets.token_hex(80))
-
-        priv = os.environ.get(self.wallet_private_key_env)
-        if not priv:
+        if self.mode != config.MODE_SHADOW:
+            priv = os.environ.get(self.wallet_private_key_env)
+            if not priv:
+                return SubmissionResult(
+                    tx_hash=None, relay=self.router.relay_url,
+                    submitted_at_ts=0.0, status="error",
+                    error=f"{self.wallet_private_key_env} not set",
+                )
+        try:
+            signed = self.signer.sign_swap(prepared_swap, nonce=nonce)
+        except Exception as e:
+            log.exception("sign failed")
             return SubmissionResult(
                 tx_hash=None, relay=self.router.relay_url,
                 submitted_at_ts=0.0, status="error",
-                error=f"{self.wallet_private_key_env} not set",
+                error=f"sign_error: {type(e).__name__}: {e}",
             )
-
-        # Deferred to Phase 5.X (needs PoolConfig token-address fields,
-        # gas estimation, EIP-1559 fee setup, nonce management).
-        return SubmissionResult(
-            tx_hash=None, relay=self.router.relay_url,
-            submitted_at_ts=0.0, status="error",
-            error="live_signing_not_implemented_phase_5x",
-        )
+        return self.router.submit_signed_tx(signed.raw_hex)

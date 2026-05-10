@@ -65,7 +65,14 @@ class PoolConfig:
     base_is_token0: bool   # True if base-token address < quote-token address
     fee_bps: int           # pool fee in bps (500 = 0.05%, 3000 = 0.30%)
     bybit_pair: str
+    base_address: str = ""    # Phase 5.X — token contract address on Base
+    quote_address: str = ""   # Phase 5.X — token contract address on Base
 
+
+# Canonical token addresses on Base mainnet (lowercase per checksum-insensitive ABI use)
+USDC_BASE = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+WETH_BASE = "0x4200000000000000000000000000000000000006"
+CBBTC_BASE = "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf"
 
 # Canonical Uniswap V3 pools on Base. Address ordering verified 2026-05-10.
 # WETH (0x42..) < USDC (0x83..)  → WETH is token0
@@ -80,6 +87,8 @@ PILOT_POOLS: dict[str, PoolConfig] = {
         base_is_token0=True,    # WETH < USDC
         fee_bps=500,
         bybit_pair="ETHUSDT",
+        base_address=WETH_BASE,
+        quote_address=USDC_BASE,
     ),
     "BTCUSDT": PoolConfig(
         # cbBTC on Base — Coinbase Wrapped BTC, deeper than WBTC on Base.
@@ -91,6 +100,8 @@ PILOT_POOLS: dict[str, PoolConfig] = {
         base_is_token0=False,   # USDC < cbBTC, so we invert
         fee_bps=500,
         bybit_pair="BTCUSDT",
+        base_address=CBBTC_BASE,
+        quote_address=USDC_BASE,
     ),
     # SOLUSDT pool address is volatile (multiple bridged-Solana issuers).
     # Phase 1.X: resolve via factory at startup.

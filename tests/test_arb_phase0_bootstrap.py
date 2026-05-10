@@ -75,19 +75,32 @@ PLAN_REQUIRED_PHRASES = [
     "BANKROLL_PER_SIDE_USD",
 ]
 
+# Per-project CLAUDE.md is intentionally slim post-2026-05-11 unified-culture
+# restructure. Only project-specific phrases must appear here.
 CLAUDE_REQUIRED_PHRASES = [
-    "Approval Gate",
-    "No Guessing",
-    "Regression Test Maintenance",
-    "Git lifecycle",
-    "All paths on D:",
+    "arbitrage",      # project name
+    "SHADOW",         # default execution mode
+    "HALT",           # kill-switch flag
 ]
 
-SETTINGS_REQUIRED_DENIES = [
+# Mandatory rules (Approval Gate, No Guessing, Regression Tests, Git lifecycle,
+# disk policy, destructive denies) live in the GLOBAL files at the parent.
+# Per-project settings.json is now an empty stub.
+GLOBAL_CLAUDE_REQUIRED_PHRASES = [
+    "Approval Gate",
+    "No Guessing",
+    "Regression Test",
+    "Git Lifecycle",
+]
+
+GLOBAL_SETTINGS_REQUIRED_DENIES = [
     "Bash(rm -rf",
     "Bash(git push --force",
     "Bash(git reset --hard",
 ]
+
+GLOBAL_CLAUDE_PATH = REPO_ROOT.parent / "CLAUDE.md"
+GLOBAL_SETTINGS_PATH = REPO_ROOT.parent / ".claude" / "settings.json"
 
 
 def _read(rel: str) -> str:
@@ -115,16 +128,37 @@ def test_plan_contains_locked_decisions() -> None:
     assert not missing, f"PLAN.md missing locked-in phrases: {missing}"
 
 
-def test_claude_md_contains_mandatory_rules() -> None:
+def test_claude_md_contains_project_specific_phrases() -> None:
+    """Per-project CLAUDE.md is slim post-unified-culture restructure;
+    must still mention project-specific phrases."""
     claude_md = _read("CLAUDE.md")
     missing = [p for p in CLAUDE_REQUIRED_PHRASES if p not in claude_md]
-    assert not missing, f"CLAUDE.md missing mandatory sections: {missing}"
+    assert not missing, f"CLAUDE.md missing project-specific phrases: {missing}"
 
 
-def test_settings_has_destructive_denies() -> None:
-    settings = _read(".claude/settings.json")
-    missing = [d for d in SETTINGS_REQUIRED_DENIES if d not in settings]
-    assert not missing, f"settings.json missing destructive denies: {missing}"
+def test_global_culture_carries_mandatory_rules() -> None:
+    """Mandatory rules (Approval Gate, No Guessing, Regression Tests, Git
+    Lifecycle) live in the global D:\\test 2\\CLAUDE.md per the 2026-05-11
+    unified-culture restructure. Skip if global file isn't present (a fresh
+    clone without parent dir won't have it)."""
+    if not GLOBAL_CLAUDE_PATH.exists():
+        return
+    text = GLOBAL_CLAUDE_PATH.read_text(encoding="utf-8")
+    missing = [p for p in GLOBAL_CLAUDE_REQUIRED_PHRASES if p not in text]
+    assert not missing, (
+        f"Global {GLOBAL_CLAUDE_PATH} missing mandatory sections: {missing}"
+    )
+
+
+def test_global_settings_has_destructive_denies() -> None:
+    """Destructive-op denies live in the global settings.json post-restructure."""
+    if not GLOBAL_SETTINGS_PATH.exists():
+        return
+    text = GLOBAL_SETTINGS_PATH.read_text(encoding="utf-8")
+    missing = [d for d in GLOBAL_SETTINGS_REQUIRED_DENIES if d not in text]
+    assert not missing, (
+        f"Global {GLOBAL_SETTINGS_PATH} missing destructive denies: {missing}"
+    )
 
 
 def test_pyproject_declares_python_311() -> None:
@@ -154,8 +188,12 @@ def _run_all() -> int:
         ("required_dirs_exist", test_required_dirs_exist),
         ("package_inits_exist", test_package_inits_exist),
         ("plan_contains_locked_decisions", test_plan_contains_locked_decisions),
-        ("claude_md_contains_mandatory_rules", test_claude_md_contains_mandatory_rules),
-        ("settings_has_destructive_denies", test_settings_has_destructive_denies),
+        ("claude_md_contains_project_specific_phrases",
+         test_claude_md_contains_project_specific_phrases),
+        ("global_culture_carries_mandatory_rules",
+         test_global_culture_carries_mandatory_rules),
+        ("global_settings_has_destructive_denies",
+         test_global_settings_has_destructive_denies),
         ("pyproject_declares_python_311", test_pyproject_declares_python_311),
         ("gitignore_excludes_secrets_and_data", test_gitignore_excludes_secrets_and_data),
         ("restart_scripts_are_powershell", test_restart_scripts_are_powershell),

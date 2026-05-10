@@ -134,20 +134,50 @@ class DexLegExecutor:
             )
 
         # TESTNET / MAINNET: build real ABI-encoded calldata for
-        # SwapRouter02.exactInputSingle((tokenIn, tokenOut, fee, recipient,
-        # amountIn, amountOutMinimum, sqrtPriceLimitX96)).
-        from eth_abi import encode  # type: ignore
+        # SwapRouter02.exactInputSingle.
+        from src.exec.calldata import (
+            ExactInputSingleParams, encode_exact_input_single,
+        )
 
         if not self.wallet_address:
             raise RuntimeError(
                 f"BASE_{self.mode}_WALLET_ADDRESS not set; cannot build swap"
             )
+        token_in_addr = (pool_cfg.quote_address if direction == "buy"
+                          else pool_cfg.base_address)
+        token_out_addr = (pool_cfg.base_address if direction == "buy"
+                           else pool_cfg.quote_address)
+        if not (token_in_addr and token_out_addr):
+            raise RuntimeError(
+                f"PoolConfig for {pair} missing token addresses — "
+                "extend src/data/dex_quote.py:PILOT_POOLS"
+            )
 
-        # Token address resolution would normally happen via PILOT_POOLS,
-        # but we don't have the token addresses on PoolConfig in Phase 1.
-        # Phase 5.X: extend PoolConfig with token addresses, or look up
-        # from a constants table here. For now, fail loudly if invoked.
-        raise NotImplementedError(
-            "live (testnet/mainnet) calldata building requires Phase-5.X "
-            "PoolConfig token-address fields. SHADOW mode is fully working."
+        params = ExactInputSingleParams(
+            token_in=token_in_addr,
+            token_out=token_out_addr,
+            fee=pool_cfg.fee_bps,
+            recipient=self.wallet_address,
+            amount_in=amount_in_wei,
+            amount_out_minimum=amount_out_min_wei,
+            sqrt_price_limit_x96=0,
+        )
+        data = encode_exact_input_single(params)
+
+        return PreparedSwap(
+            pair=pair, direction=direction,
+            src_token=src_token, dst_token=dst_token,
+            src_amount_human=src_amount_human,
+            amount_in_wei=amount_in_wei,
+            amount_out_min_wei=amount_out_min_wei,
+            deadline_unix=deadline_unix,
+            fee_tier_bps=pool_cfg.fee_bps,
+            pool_address=pool_cfg.pool_address,
+            router_address=SWAP_ROUTER_BASE,
+            chain_id=config.BASE_CHAIN_ID,
+            to_address=self.wallet_address,
+            data_hex=data.hex(),
+            value_wei=0,
+            mode=self.mode,
+            is_shadow=False,
         )
