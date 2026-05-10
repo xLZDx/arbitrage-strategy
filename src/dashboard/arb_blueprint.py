@@ -261,6 +261,43 @@ def pnl_simulated():
     })
 
 
+@bp.route("/risk", methods=["GET"])
+def risk_state():
+    """Phase 4 — current risk state + pre-flight gate result."""
+    from src.ops import health as ops_health
+    from src.risk import limits as risk_limits
+
+    # Build a lightweight RiskState from sim_trades (today's PnL).
+    state = risk_limits.RiskState()
+    if arb_store.table_exists("sim_trades"):
+        glob = (arb_store.table_dir("sim_trades") / "**" / "*.parquet").as_posix()
+        sql = f"""
+            SELECT COALESCE(SUM(realized_pnl_usd), 0.0) AS pnl
+            FROM read_parquet('{glob}', hive_partitioning=1)
+            WHERE ts >= strftime('%Y-%m-%d', current_date) || 'T00:00:00'
+        """
+        rows = arb_store.query(sql)
+        if rows:
+            state.today_realized_pnl_usd = float(rows[0][0])
+
+    gate = risk_limits.preflight(opportunity=None, state=state)
+    snap = ops_health.services_snapshot()
+    return jsonify({
+        "halt_active": risk_limits.halt_active(),
+        "halt_reason": risk_limits.halt_reason(),
+        "mode": config.EXECUTION_MODE,
+        "today_realized_pnl_usd": round(state.today_realized_pnl_usd, 4),
+        "daily_loss_cap_usd": state.daily_loss_cap_usd,
+        "drawdown_trigger_usd": state.drawdown_trigger_usd,
+        "per_trade_cap_usd": state.per_trade_cap_usd,
+        "preflight_ok": gate.is_ok(),
+        "preflight_decision": gate.decision,
+        "preflight_reason": gate.reason,
+        "services": snap["services"],
+        "table_freshness_s": snap["table_freshness_s"],
+    })
+
+
 @bp.route("/sim_trades", methods=["GET"])
 def sim_trades():
     """Phase 3 simulator output. Latest N replayed trades."""
