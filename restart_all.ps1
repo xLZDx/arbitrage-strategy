@@ -53,9 +53,9 @@ Write-Host "    PID $($ingestProc.Id)"
 # --- Launch dashboard (standalone, port 5001) ---
 $DashLog = Join-Path $LogDir "arb_dashboard_$Date.log"
 $DashPid = Join-Path $PidDir "dashboard.pid"
-Write-Host "  starting dashboard on :5001 -> $DashLog"
+Write-Host "  starting dashboard on :5002 -> $DashLog"
 $dashProc = Start-Process -FilePath $Python `
-    -ArgumentList "-m", "src.dashboard.app_arb", "--port", "5001", "--host", "127.0.0.1" `
+    -ArgumentList "-m", "src.dashboard.app_arb", "--port", "5002", "--host", "127.0.0.1" `
     -WorkingDirectory $RepoRoot `
     -RedirectStandardOutput $DashLog `
     -RedirectStandardError "$DashLog.err" `
@@ -68,7 +68,7 @@ Start-Sleep -Seconds 2
 
 # --- Smoke check ---
 try {
-    $resp = Invoke-WebRequest -Uri "http://127.0.0.1:5001/api/arb/health" `
+    $resp = Invoke-WebRequest -Uri "http://127.0.0.1:5002/api/arb/health" `
         -UseBasicParsing -TimeoutSec 5
     if ($resp.StatusCode -eq 200) {
         $body = $resp.Content | ConvertFrom-Json
@@ -80,4 +80,4 @@ try {
     Write-Host "[WARN] dashboard health check failed: $_" -ForegroundColor Yellow
 }
 
-Write-Host "[$(Get-Date -Format 'HH:mm:ss')] all services launched. Open http://127.0.0.1:5001/"
+Write-Host "[$(Get-Date -Format 'HH:mm:ss')] all services launched. Open http://127.0.0.1:5002/"

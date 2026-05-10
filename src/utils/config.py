@@ -90,7 +90,7 @@ ARROW_BATCH_FLUSH_S = 5.0
 
 DASHBOARD_API_PREFIX = "/api/arb"
 DASHBOARD_PORT_PRIMARY = 5000
-DASHBOARD_PORT_FALLBACK = 5001  # used if primary p95 latency rises >20%
+DASHBOARD_PORT_FALLBACK = 5002  # 5001 is sister-project monitor; arb uses 5002
 
 
 def is_shadow_mode() -> bool:
