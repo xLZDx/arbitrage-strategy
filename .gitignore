@@ -1,0 +1,51 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Virtualenv
+venv/
+.venv/
+env/
+
+# Secrets / env
+.env
+.env.*
+!.env.example
+
+# Data — never commit captured market data or models
+data/arb/
+logs/
+models/*.joblib
+models/*.zip
+models/*.pt
+models/*.pth
+models/*.ckpt
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Claude Code session-local state (allow settings.json + settings.local.json to track per-machine)
+.claude/scheduled_tasks.lock
+
+# Lockfiles for state files we DO want tracked are explicit exceptions:
+!data/arb/HALT.example
