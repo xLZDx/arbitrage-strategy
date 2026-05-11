@@ -235,11 +235,16 @@ def test_gas_returns_latest() -> None:
 
 
 def test_index_renders_html() -> None:
+    """Smoke: index returns the dashboard HTML with key references."""
     client = create_app().test_client()
     r = client.get("/")
     assert r.status_code == 200
-    assert b"arbitrage_strategy" in r.data
-    assert b"/api/arb/spread" in r.data
+    # New control-panel HTML; check for any of the recognizable markers.
+    body = r.data
+    assert b"arbitrage" in body
+    assert b"/api/arb/spread" in body
+    assert b"Risk" in body  # the new control card
+    assert b"Counter-factual" in body  # counter-factual card present
 
 
 def test_healthz() -> None:

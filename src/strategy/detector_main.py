@@ -142,7 +142,9 @@ async def detector_loop(
                 obi_delta=obi["obi_delta"],
                 cancellation_rate=obi["cancellation_rate"],
                 gas_total_gwei=gas["total_gas_price_gwei"],
-                pool_fee_bps=cfg.fee_bps,
+                # FIX 2026-05-11: cfg.fee_bps is Uniswap V3 raw fee tier
+                # (e.g. 500 = 0.05%); convert to actual bps for cost math.
+                pool_fee_bps=cfg.fee_bps / 100.0,
                 eth_price_usd=eth_price,
             )
             opps.append(op)

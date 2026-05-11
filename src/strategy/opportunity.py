@@ -150,6 +150,11 @@ def detect_opportunity(
     if bybit_fee_bps is None:
         bybit_fee_bps = (BYBIT_MAKER_FEE_BPS if config.PREFER_MAKER
                           else BYBIT_TAKER_FEE_BPS)
+    # NOTE: pool_fee_bps must be ACTUAL bps (e.g. 5 for a 0.05% pool).
+    # PoolConfig.fee_bps stores Uniswap V3 raw fee tier (500/3000/10000);
+    # callers MUST divide by 100 before passing here. See detector_main.py
+    # for the canonical conversion. This was a silent bug pre-2026-05-11
+    # that caused 100x cost over-counting and all-SKIP outcomes.
     """
     Pure decision function. Always returns an Opportunity record (never None);
     decision="GO" or "SKIP". Every call must produce a row so the dataset

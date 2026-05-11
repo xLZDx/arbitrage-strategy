@@ -261,6 +261,399 @@ def pnl_simulated():
     })
 
 
+@bp.route("/soak_summary", methods=["GET"])
+def soak_summary():
+    """Panel data for the soak summary card.
+
+    Aggregates the same info that scripts/show_overnight_summary.py prints
+    but as JSON for the dashboard."""
+    out = {"tables": {}, "spread_distribution": [],
+           "decisions": [], "go_pnl_total": 0.0,
+           "drift_alerts": [], "last_trades": []}
+
+    for table in ("obi_snapshots", "dex_quotes", "gas_history",
+                   "opportunities", "sim_trades", "trades", "paper_trades"):
+        if not arb_store.table_exists(table):
+            out["tables"][table] = None
+            continue
+        glob = (arb_store.table_dir(table) / "**" / "*.parquet").as_posix()
+        rows = arb_store.query(
+            f"SELECT MIN(ts), MAX(ts), COUNT(*) FROM read_parquet('{glob}', hive_partitioning=1)"
+        )
+        first, last, n = rows[0] if rows else (None, None, 0)
+        out["tables"][table] = (
+            {"n": int(n), "first": first, "last": last} if n else None
+        )
+
+    if arb_store.table_exists("opportunities"):
+        glob = (arb_store.table_dir("opportunities") / "**" / "*.parquet").as_posix()
+        rows = arb_store.query(f"""
+            SELECT pair, COUNT(*) AS n,
+                   MIN(spread_bps) AS min_bps,
+                   MEDIAN(spread_bps) AS med_bps,
+                   MAX(spread_bps) AS max_bps,
+                   AVG(ABS(spread_bps)) AS avg_abs_bps
+            FROM read_parquet('{glob}', hive_partitioning=1)
+            GROUP BY pair ORDER BY pair
+        """)
+        out["spread_distribution"] = [
+            {"pair": r[0], "n": int(r[1]),
+             "min": round(float(r[2]), 4), "median": round(float(r[3]), 4),
+             "max": round(float(r[4]), 4), "avg_abs": round(float(r[5]), 4)}
+            for r in rows
+        ]
+        rows = arb_store.query(f"""
+            SELECT decision, reason, COUNT(*) AS n,
+                   COALESCE(SUM(theoretical_pnl_usd), 0.0) AS pnl
+            FROM read_parquet('{glob}', hive_partitioning=1)
+            GROUP BY decision, reason ORDER BY decision, n DESC
+        """)
+        out["decisions"] = [
+            {"decision": r[0], "reason": r[1], "n": int(r[2]),
+             "pnl": round(float(r[3]), 4)}
+            for r in rows
+        ]
+        rows = arb_store.query(f"""
+            SELECT COALESCE(SUM(theoretical_pnl_usd), 0.0)
+            FROM read_parquet('{glob}', hive_partitioning=1)
+            WHERE decision = 'GO'
+        """)
+        out["go_pnl_total"] = round(float(rows[0][0]), 4) if rows else 0.0
+
+    drift_path = config.LOG_DIR / "drift_alerts.jsonl"
+    if drift_path.exists():
+        lines = drift_path.read_text(encoding="utf-8").strip().splitlines()
+        out["drift_alerts"] = lines[-10:]
+
+    if arb_store.table_exists("trades"):
+        glob = (arb_store.table_dir("trades") / "**" / "*.parquet").as_posix()
+        rows = arb_store.query(f"""
+            SELECT ts, pair, outcome, reason, realized_net_bps
+            FROM read_parquet('{glob}', hive_partitioning=1)
+            ORDER BY ts DESC LIMIT 5
+        """)
+        out["last_trades"] = [
+            {"ts": r[0], "pair": r[1], "outcome": r[2],
+             "reason": r[3], "realized_net_bps": float(r[4])}
+            for r in rows
+        ]
+    return jsonify(out)
+
+
+@bp.route("/run_replay", methods=["POST"])
+def run_replay_endpoint():
+    """Runs the replay simulator server-side and returns aggregate results."""
+    import random
+    from src.sim.replay import replay
+    from src.utils import config as cfg
+
+    body = request.get_json(silent=True) or {}
+    seed = int(body.get("seed", 0))
+    bankroll = float(body.get("bankroll", cfg.BANKROLL_PER_SIDE_USD))
+    write = bool(body.get("write", False))
+
+    if not arb_store.table_exists("opportunities"):
+        return jsonify({"error": "no_opportunities_yet"}), 400
+
+    glob = (arb_store.table_dir("opportunities") / "**" / "*.parquet").as_posix()
+    keys = ("ts", "pair", "bybit_mid", "bybit_bid", "bybit_ask", "dex_mid",
+            "spread_bps", "gross_bps", "direction", "weighted_obi", "obi_delta",
+            "cancellation_rate", "gas_gwei", "gas_cost_bps", "bybit_fee_bps",
+            "dex_fee_bps", "slippage_haircut_bps", "expected_net_bps",
+            "notional_usd", "theoretical_pnl_usd", "decision", "reason",
+            "eth_price_used")
+    rows = arb_store.query(
+        f"SELECT {','.join(keys)} FROM read_parquet('{glob}', hive_partitioning=1) "
+        f"ORDER BY ts ASC"
+    )
+    opps = [dict(zip(keys, r)) for r in rows]
+    result = replay(opps, initial_usd_per_side=bankroll, rng=random.Random(seed))
+
+    if write and result.trades:
+        from dataclasses import asdict
+        rows_by_pair = {}
+        for t in result.trades:
+            rows_by_pair.setdefault(t.pair, []).append(asdict(t))
+        for pair, rows in rows_by_pair.items():
+            arb_store.write_records("sim_trades", rows, pair=pair)
+
+    sharpe = result.sharpe()
+    return jsonify({
+        "n_opportunities": len(opps),
+        "n_go": result.n_trades,
+        "n_filled": result.n_filled,
+        "n_inventory_rejected": result.n_inventory_rejected,
+        "hit_rate": result.hit_rate,
+        "cumulative_pnl_usd": result.cumulative_pnl_usd,
+        "avg_realized_net_bps": result.avg_realized_net_bps,
+        "sharpe": sharpe,
+        "kill_criterion_breached": (sharpe is not None and sharpe < 1.0),
+        "written": write and len(result.trades) > 0,
+        "starting_equity": result.starting_equity_usd,
+        "final_equity": result.equity_curve[-1][1] if result.equity_curve else result.starting_equity_usd,
+    })
+
+
+@bp.route("/train_histgbt", methods=["POST"])
+def train_histgbt_endpoint():
+    """Train HistGBT on captured opportunities + sim_trades, save artifact."""
+    import numpy as np
+    from src.ml.feature_pipeline import label_from_sim_trade, stack_features
+    from src.ml.hist_gbt import save_artifact, train_histgbt
+
+    if not arb_store.table_exists("opportunities") or \
+       not arb_store.table_exists("sim_trades"):
+        return jsonify({
+            "error": "need_both_opportunities_and_sim_trades",
+            "hint": "Run /api/arb/run_replay first with write=true",
+        }), 400
+
+    opp_glob = (arb_store.table_dir("opportunities") / "**" / "*.parquet").as_posix()
+    sim_glob = (arb_store.table_dir("sim_trades") / "**" / "*.parquet").as_posix()
+    sql = f"""
+        SELECT o.ts, o.pair, o.spread_bps, o.gross_bps, o.direction,
+               o.weighted_obi, o.obi_delta, o.cancellation_rate,
+               o.gas_gwei, o.gas_cost_bps, o.slippage_haircut_bps,
+               o.expected_net_bps, o.notional_usd,
+               s.realized_pnl_usd, s.inventory_ok, s.fill_pct
+        FROM read_parquet('{opp_glob}', hive_partitioning=1) o
+        JOIN read_parquet('{sim_glob}', hive_partitioning=1) s
+          ON o.ts = s.ts AND o.pair = s.pair
+        WHERE o.decision = 'GO'
+        ORDER BY o.ts ASC
+    """
+    rows = arb_store.query(sql)
+    keys = ("ts", "pair", "spread_bps", "gross_bps", "direction",
+            "weighted_obi", "obi_delta", "cancellation_rate",
+            "gas_gwei", "gas_cost_bps", "slippage_haircut_bps",
+            "expected_net_bps", "notional_usd",
+            "realized_pnl_usd", "inventory_ok", "fill_pct")
+    opps = []
+    labels = []
+    timestamps = []
+    for r in rows:
+        d = dict(zip(keys, r))
+        opps.append(d)
+        labels.append(label_from_sim_trade(d))
+        timestamps.append(d["ts"])
+    if len(opps) < 20:
+        return jsonify({
+            "error": "too_few_samples",
+            "detail": f"need >= 20 GO trades with sim_trade labels, got {len(opps)}",
+        }), 400
+    X = stack_features(opps)
+    y = np.array(labels, dtype=np.int32)
+    try:
+        art = train_histgbt(X, y, timestamps=timestamps)
+    except ValueError as e:
+        return jsonify({"error": "train_failed", "detail": str(e)}), 400
+    path = save_artifact(art)
+    return jsonify({
+        "saved": str(path),
+        "holdout_auc": art.holdout_auc,
+        "n_train": art.n_train,
+        "n_holdout": art.n_holdout,
+        "pos_rate_train": art.pos_rate_train,
+        "veto_threshold": art.veto_threshold,
+    })
+
+
+@bp.route("/run_drill", methods=["POST"])
+def run_drill_endpoint():
+    """Risk drill — equivalent to scripts/risk_drill.py, returns 8 check results."""
+    from src.risk import limits as rl
+    checks = []
+
+    def _record(name: str, ok: bool, detail: str = ""):
+        checks.append({"name": name, "ok": ok, "detail": detail})
+
+    rl.halt_clear()
+    state = rl.RiskState()
+    gate = rl.preflight(opportunity=None, state=state)
+    _record("clean_state_ok", gate.decision == "OK", gate.reason)
+
+    rl.halt_set("drill: manual halt")
+    import time as _t
+    t0 = _t.time()
+    gate = rl.preflight(opportunity=None, state=state)
+    elapsed = _t.time() - t0
+    _record("manual_halt_within_2s",
+             gate.decision == "HALT" and elapsed < 2.0,
+             f"{elapsed*1000:.1f}ms")
+    rl.halt_clear()
+
+    state = rl.RiskState()
+    state.today_realized_pnl_usd = -state.daily_loss_cap_usd - 1.0
+    triggered = rl.maybe_auto_halt(state)
+    _record("daily_loss_auto_halt", triggered and rl.halt_active(),
+             f"cap=${state.daily_loss_cap_usd:.2f}")
+    rl.halt_clear()
+
+    state = rl.RiskState()
+    state.rolling_24h_drawdown_usd = state.drawdown_trigger_usd + 0.01
+    triggered = rl.maybe_auto_halt(state)
+    _record("drawdown_auto_halt", triggered and rl.halt_active(),
+             f"trigger=${state.drawdown_trigger_usd:.2f}")
+    rl.halt_clear()
+
+    state = rl.RiskState()
+    state.inventory_imbalance = 0.30
+    triggered = rl.maybe_auto_halt(state)
+    _record("imbalance_auto_halt", triggered and rl.halt_active(),
+             "0.30 > 0.25")
+    rl.halt_clear()
+
+    state = rl.RiskState()
+    bad_opp = {"decision": "GO", "notional_usd": state.per_trade_cap_usd * 5,
+               "expected_net_bps": 50.0}
+    gate = rl.preflight(opportunity=bad_opp, state=state)
+    _record("oversized_notional_reject",
+             gate.decision == "REJECT" and "notional_exceeds_cap" in gate.reason,
+             gate.reason)
+
+    state = rl.RiskState()
+    weak = {"decision": "GO", "notional_usd": 50.0, "expected_net_bps": 1.0}
+    gate = rl.preflight(opportunity=weak, state=state)
+    _record("below_min_bps_reject",
+             gate.decision == "REJECT" and "below_min_net_bps" in gate.reason,
+             gate.reason)
+
+    rl.halt_clear()
+    gate = rl.preflight(opportunity=None, state=rl.RiskState())
+    _record("clear_restores_ok", gate.decision == "OK", gate.reason)
+
+    # Write drill marker for live-ramp guard freshness check
+    drill_log = config.LOG_DIR / "drill_runs.jsonl"
+    drill_log.parent.mkdir(parents=True, exist_ok=True)
+    from datetime import datetime, timezone
+    safe_json.append_jsonl(drill_log, {
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "checks": checks,
+        "passed": all(c["ok"] for c in checks),
+    })
+
+    return jsonify({
+        "passed": all(c["ok"] for c in checks),
+        "n_total": len(checks),
+        "n_passed": sum(1 for c in checks if c["ok"]),
+        "checks": checks,
+    })
+
+
+@bp.route("/halt", methods=["POST"])
+def halt_endpoint():
+    """Set or clear the HALT flag from the dashboard."""
+    from src.risk import limits as rl
+    body = request.get_json(silent=True) or {}
+    action = body.get("action", "")
+    if action == "set":
+        reason = body.get("reason", "dashboard manual halt")
+        rl.halt_set(f"dashboard: {reason}")
+        return jsonify({"halt_active": True, "reason": rl.halt_reason()})
+    if action == "clear":
+        cleared = rl.halt_clear()
+        return jsonify({"halt_active": False, "cleared": cleared})
+    return jsonify({"error": "action must be 'set' or 'clear'"}), 400
+
+
+@bp.route("/maker_mode", methods=["GET", "POST"])
+def maker_mode_endpoint():
+    """Get or toggle ARB_PREFER_MAKER for the current process.
+
+    Note: this affects only the running dashboard process. The ingestion
+    process picks up the new value at its next restart_all.ps1.
+    A persistent toggle goes through a file flag at data/arb/MAKER_PREFERRED.
+    """
+    flag_path = config.DATA_DIR / "MAKER_PREFERRED"
+    if request.method == "POST":
+        body = request.get_json(silent=True) or {}
+        enabled = bool(body.get("enabled", False))
+        if enabled:
+            flag_path.touch()
+        else:
+            flag_path.unlink(missing_ok=True)
+        os.environ["ARB_PREFER_MAKER"] = "1" if enabled else "0"
+        # Reload config so any in-process reads see the new value
+        import importlib
+        importlib.reload(config)
+        return jsonify({"enabled": enabled, "needs_restart": True,
+                        "flag_path": str(flag_path)})
+    return jsonify({
+        "enabled": flag_path.exists() or os.environ.get("ARB_PREFER_MAKER") == "1",
+        "flag_path": str(flag_path),
+    })
+
+
+@bp.route("/counterfactual", methods=["POST"])
+def counterfactual_endpoint():
+    """Re-evaluate captured opportunities with different fee/notional assumptions.
+
+    Body: {bybit_fee_bps: float, notional_usd: float (optional)}
+    Returns: {n_go, n_skip, go_pnl_total, by_pair: [...]}
+    """
+    from src.strategy.opportunity import detect_opportunity
+
+    if not arb_store.table_exists("opportunities"):
+        return jsonify({"error": "no_opportunities_yet"}), 400
+
+    body = request.get_json(silent=True) or {}
+    bybit_fee_bps = float(body.get("bybit_fee_bps", 1.0))  # default maker
+    notional_override = body.get("notional_usd")
+
+    glob = (arb_store.table_dir("opportunities") / "**" / "*.parquet").as_posix()
+    keys = ("ts", "pair", "bybit_bid", "bybit_ask", "dex_mid", "weighted_obi",
+            "obi_delta", "cancellation_rate", "gas_gwei", "dex_fee_bps",
+            "notional_usd", "eth_price_used")
+    rows = arb_store.query(
+        f"SELECT {','.join(keys)} FROM read_parquet('{glob}', hive_partitioning=1)"
+    )
+
+    by_pair = {}
+    total_go = 0
+    total_skip = 0
+    total_pnl = 0.0
+    for r in rows:
+        d = dict(zip(keys, r))
+        notional = float(notional_override) if notional_override else float(d["notional_usd"])
+        op = detect_opportunity(
+            ts=d["ts"], pair=d["pair"],
+            bybit_bid=d["bybit_bid"], bybit_ask=d["bybit_ask"],
+            dex_mid=d["dex_mid"], weighted_obi=d["weighted_obi"],
+            obi_delta=d["obi_delta"], cancellation_rate=d["cancellation_rate"],
+            gas_total_gwei=d["gas_gwei"], pool_fee_bps=d["dex_fee_bps"],
+            notional_usd=notional, eth_price_usd=d["eth_price_used"],
+            bybit_fee_bps=bybit_fee_bps,
+        )
+        slot = by_pair.setdefault(op.pair, {"go": 0, "skip": 0, "pnl": 0.0,
+                                              "max_net_bps": -1e9})
+        if op.decision == "GO":
+            slot["go"] += 1
+            slot["pnl"] += op.theoretical_pnl_usd
+            total_go += 1
+            total_pnl += op.theoretical_pnl_usd
+        else:
+            slot["skip"] += 1
+            total_skip += 1
+        if op.expected_net_bps > slot["max_net_bps"]:
+            slot["max_net_bps"] = op.expected_net_bps
+
+    return jsonify({
+        "n_total": total_go + total_skip,
+        "n_go": total_go,
+        "n_skip": total_skip,
+        "go_pnl_total": round(total_pnl, 4),
+        "bybit_fee_bps_used": bybit_fee_bps,
+        "notional_usd_used": notional_override,
+        "by_pair": [
+            {"pair": pair,
+             "go": s["go"], "skip": s["skip"],
+             "pnl": round(s["pnl"], 4),
+             "max_net_bps": round(s["max_net_bps"], 4)}
+            for pair, s in sorted(by_pair.items())
+        ],
+    })
+
+
 @bp.route("/model_status", methods=["GET"])
 def model_status():
     """Phase 6 — HistGBT artifact metadata."""
