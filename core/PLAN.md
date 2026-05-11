@@ -20,6 +20,8 @@
 | 13  DRL navigator | STUB (deferred per Q1) | Dummy + HoldOnHighGas; PPO is Phase 13.X |
 
 Live ingestion + dashboard wired and tested in SHADOW. Live execution requires user-provided BYBIT_TESTNET_API_KEY/SECRET + BASE_WALLET_PRIVATE_KEY (Phase 5.X).
+
+**Q5 fully realized 2026-05-11:** the arbitrage dashboard appears as an "Arbitrage" tab on the trading-bot dashboard at port 5000 via reverse-proxy. /arb/* and /api/arb/* on :5000 forward to the standalone arb dashboard on :5002. Two processes still run (one per project) — no namespace shadowing — but the UX is single-URL.
 **Project root:** `D:\test 2\arbitrage_strategy\`
 **Source spec:** `arbitrage.txt` (root of this project)
 **Reuse source:** `D:\test 2\AI trading assistance\` (existing trading bot)
