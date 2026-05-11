@@ -119,32 +119,36 @@ def test_imbalance_ratio_safe_when_total_zero() -> None:
 
 
 def test_balanced_seed_splits_50_50_by_default() -> None:
-    inv = Inventory.with_balanced_seed(usd_per_side=600.0)
-    # 50% stable: $300 USDT + $300 USDC
-    assert inv.get("bybit", "USDT") == 300.0
-    assert inv.get("dex", "USDC") == 300.0
-    # 50% non-stable split across 3 pairs = $100/asset
+    """4 pilot pairs (BTC/ETH/SOL/AERO) → 50% stable + 50% / 4 per asset."""
+    inv = Inventory.with_balanced_seed(usd_per_side=800.0)
+    # 50% stable: $400 USDT + $400 USDC
+    assert inv.get("bybit", "USDT") == 400.0
+    assert inv.get("dex", "USDC") == 400.0
+    # 50% non-stable split across 4 pairs = $100/asset
     assert inv.get("bybit", "BTC") == 100.0
     assert inv.get("bybit", "ETH") == 100.0
     assert inv.get("bybit", "SOL") == 100.0
+    assert inv.get("bybit", "AERO") == 100.0
     assert inv.get("dex", "cbBTC") == 100.0
     assert inv.get("dex", "WETH") == 100.0
     assert inv.get("dex", "wSOL") == 100.0
+    assert inv.get("dex", "AERO") == 100.0
 
 
 def test_balanced_seed_custom_split() -> None:
-    inv = Inventory.with_balanced_seed(usd_per_side=300.0, usd_split_pct=70.0)
-    # 70% stable: $210 each
-    assert inv.get("bybit", "USDT") == 210.0
-    assert inv.get("dex", "USDC") == 210.0
-    # 30% non-stable / 3 pairs = $30 each
+    inv = Inventory.with_balanced_seed(usd_per_side=400.0, usd_split_pct=70.0)
+    # 70% stable: $280 each
+    assert inv.get("bybit", "USDT") == 280.0
+    assert inv.get("dex", "USDC") == 280.0
+    # 30% non-stable / 4 pairs = $30 each
     assert inv.get("bybit", "BTC") == 30.0
 
 
 def test_balanced_seed_supports_bybit_high_first_trade() -> None:
     """The whole point: a balanced seed must let SELL-BTC-on-Bybit succeed
-    on the first call (regression for the unbalanced-seed bug)."""
-    inv = Inventory.with_balanced_seed(usd_per_side=300.0)
+    on the first call (regression for the unbalanced-seed bug). After AERO
+    addition, per-asset USD is smaller so test bumps bankroll proportionally."""
+    inv = Inventory.with_balanced_seed(usd_per_side=400.0)
     legs = [
         ("bybit", "BTC",   -50.0),  # sell $50 of BTC on Bybit
         ("bybit", "USDT",  +50.0),

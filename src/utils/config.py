@@ -27,7 +27,17 @@ for _d in (DATA_DIR, DB_DIR, CACHE_DIR, DUCKDB_TEMP_DIR, LOG_DIR, MODEL_DIR, PID
 
 # --- Pilot trading pairs (Q3 lock-in) --------------------------------------
 
-PILOT_PAIRS: tuple[str, ...] = ("BTCUSDT", "ETHUSDT", "SOLUSDT")
+PILOT_PAIRS: tuple[str, ...] = ("BTCUSDT", "ETHUSDT", "SOLUSDT", "AEROUSDT")
+
+# Bybit fee tiers (bps). Maker = post-only limit; taker = market.
+# Using maker drops fees ~10x, but adds latency risk + miss probability.
+BYBIT_MAKER_FEE_BPS: float = 1.0   # ~1 bp at low VIP tier
+BYBIT_TAKER_FEE_BPS: float = 10.0
+# Coordinator picks maker when configured AND opportunity allows (some
+# strategies need immediate fill — taker — but most CEX-DEX arb tolerates
+# the few-second wait for a maker fill).
+PREFER_MAKER: bool = os.environ.get("ARB_PREFER_MAKER", "0") == "1"
+MAKER_FILL_TIMEOUT_S: float = 3.0  # if maker doesn't fill in this window → cancel + fall back to taker
 
 # Bybit symbol -> on-chain wrapped token pair on Base.
 # DEX pool addresses are filled in src/data/dex_quote.py at startup

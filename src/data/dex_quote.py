@@ -73,6 +73,7 @@ class PoolConfig:
 USDC_BASE = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
 WETH_BASE = "0x4200000000000000000000000000000000000006"
 CBBTC_BASE = "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf"
+AERO_BASE = "0x940181a94a35a4569e4529a3cdfb74e38fd98631"  # Aerodrome native
 
 # Canonical Uniswap V3 pools on Base. Address ordering verified 2026-05-10.
 # WETH (0x42..) < USDC (0x83..)  → WETH is token0
@@ -105,6 +106,13 @@ PILOT_POOLS: dict[str, PoolConfig] = {
     ),
     # SOLUSDT pool address is volatile (multiple bridged-Solana issuers).
     # Phase 1.X: resolve via factory at startup.
+    # AEROUSDT: pool address 0x82321f3BEB69f503380D6B233857d5C43562e2D0
+    # was returning garbage on first live run (-4 trillion bps spread). Either
+    # wrong address or decimal-orientation bug. Disabled until verified via
+    # Uniswap V3 factory.getPool(AERO, USDC, 10000) lookup. The opportunity
+    # detector now has IMPLAUSIBLE_SPREAD_BPS guard so even if reactivated
+    # with a wrong address, it can't produce fake GO signals.
+    # "AEROUSDT": PoolConfig(...),
 }
 
 

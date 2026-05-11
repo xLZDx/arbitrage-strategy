@@ -20,8 +20,8 @@ from typing import Literal
 
 VenueT = Literal["bybit", "dex"]
 ASSETS_BY_VENUE: dict[VenueT, tuple[str, ...]] = {
-    "bybit": ("USDT", "BTC", "ETH", "SOL"),
-    "dex":   ("USDC", "cbBTC", "WETH", "wSOL"),
+    "bybit": ("USDT", "BTC", "ETH", "SOL", "AERO"),
+    "dex":   ("USDC", "cbBTC", "WETH", "wSOL", "AERO"),
 }
 
 # Map Bybit pair → (bybit_base_asset, dex_base_asset). Used to translate
@@ -30,6 +30,7 @@ PAIR_LEGS: dict[str, tuple[str, str]] = {
     "BTCUSDT": ("BTC", "cbBTC"),
     "ETHUSDT": ("ETH", "WETH"),
     "SOLUSDT": ("SOL", "wSOL"),
+    "AEROUSDT": ("AERO", "AERO"),  # same symbol on both sides; AERO is native
 }
 
 

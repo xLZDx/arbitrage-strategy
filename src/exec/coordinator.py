@@ -38,6 +38,7 @@ from src.exec.private_rpc_router import PrivateRpcRouter, SubmissionResult
 from src.ml.feature_pipeline import extract_features
 from src.ml.hist_gbt import HistGBTArtifact, load_artifact
 from src.risk import limits as risk
+from src.security.goplus_scanner import GoPlusScanner
 from src.sim.inventory import Inventory, PAIR_LEGS
 from src.utils import config
 
@@ -73,6 +74,9 @@ class TradeRecord:
     realized_net_bps: float = 0.0
     histgbt_p: float | None = None        # P(profitable) from HistGBT
     histgbt_vetoed: bool = False
+    goplus_scanned: bool = False
+    goplus_safe: bool | None = None        # None = not scanned (major); True/False = result
+    goplus_reason: str | None = None
 
 
 def _new_trade_id() -> str:
@@ -102,10 +106,14 @@ class ArbCoordinator:
     histgbt_required: bool = False  # if True, missing model → REJECT
     # Phase 5.X: live signer + submitter. Lazily constructed.
     flashbots: FlashbotsExecutor | None = None
+    # Phase 9: GoPlus scanner. Activates only for non-major tokens.
+    goplus: GoPlusScanner | None = None
 
     def __post_init__(self) -> None:
         if self.flashbots is None:
             self.flashbots = FlashbotsExecutor(router=self.router)
+        if self.goplus is None:
+            self.goplus = GoPlusScanner()
 
     def attempt(
         self,
@@ -174,6 +182,26 @@ class ArbCoordinator:
             rec.outcome = "rejected_inventory"
             rec.reason = f"no_pool_config: {pair}"
             return rec
+
+        # 3.5 Phase 9 — GoPlus scan for non-majors. Majors short-circuit
+        # inside the scanner; long-tail tokens hit the API and fail closed
+        # on revert/timeout. This is the personal-use safety net for the
+        # AERO/long-tail pairs.
+        if pool_cfg.base_address and not GoPlusScanner.is_major(pool_cfg.base_address):
+            rec.goplus_scanned = True
+            try:
+                import asyncio
+                scan = asyncio.run(self.goplus.scan(pool_cfg.base_address))
+                rec.goplus_safe = scan.is_safe
+                rec.goplus_reason = scan.reason
+                if not scan.is_safe:
+                    rec.outcome = "rejected_preflight"
+                    rec.reason = f"goplus_blocked: {scan.reason}"
+                    return rec
+            except Exception as e:
+                rec.outcome = "rejected_preflight"
+                rec.reason = f"goplus_error: {type(e).__name__}: {e}"
+                return rec
         dex_dir = "buy" if direction == "dex_high" else "sell"
         live_mid = live_dex_mid or float(opportunity.get("dex_mid", 0.0))
         if live_mid <= 0:

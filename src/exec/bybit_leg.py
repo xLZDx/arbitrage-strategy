@@ -133,6 +133,106 @@ class BybitLegExecutor:
 
     # ------------------------------------------------------------------
 
+    def place_spot_maker(
+        self,
+        symbol: str,
+        side: SideT,
+        qty_usd: float,
+        trade_id: str,
+        limit_price: float,
+        timeout_s: float | None = None,
+    ) -> Fill:
+        """
+        Post-only limit order. Saves ~9 bps vs taker. If it doesn't fill
+        within timeout_s, returns a "rejected" Fill with reason
+        "maker_timeout" so the caller can fall back to a taker.
+
+        SHADOW: returns a synthetic shadow fill at limit_price (no API call).
+        """
+        from src.utils import config
+        client_order_id = make_client_order_id(trade_id, "bybit-maker")
+        cached = self._idempotency_cache.get(client_order_id)
+        if cached:
+            log.info("idempotent maker replay: %s", client_order_id)
+            return Fill(**cached)
+        if self.mode == config.MODE_SHADOW:
+            fill = Fill(
+                symbol=symbol, side=side,
+                requested_qty_usd=qty_usd, filled_qty_usd=qty_usd,
+                avg_price=limit_price, status="shadow",
+                venue_order_id=None, client_order_id=client_order_id,
+                mode=self.mode,
+            )
+        else:
+            fill = self._live_maker_fill(symbol, side, qty_usd, client_order_id,
+                                          limit_price, timeout_s)
+        self._persist_idempotency(client_order_id, fill)
+        return fill
+
+    def _live_maker_fill(self, symbol, side, qty_usd, coid, limit_price,
+                         timeout_s) -> Fill:
+        from src.utils import config
+        if self._client is None:
+            return Fill(symbol, side, qty_usd, 0.0, 0.0, "error", None, coid,
+                        self.mode, error="client_not_initialized")
+        timeout_s = timeout_s or config.MAKER_FILL_TIMEOUT_S
+        try:
+            qty_base = qty_usd / float(limit_price)
+            order = self._client.create_limit_order(  # type: ignore
+                symbol=symbol, side=side.lower(), amount=qty_base,
+                price=float(limit_price),
+                params={"clientOrderId": coid, "timeInForce": "PostOnly"},
+            )
+            order_id = str(order.get("id") or "")
+            import time as _t
+            deadline = _t.time() + timeout_s
+            while _t.time() < deadline:
+                try:
+                    refreshed = self._client.fetch_order(order_id, symbol)  # type: ignore
+                except Exception:
+                    refreshed = order
+                filled = float(refreshed.get("filled") or 0.0)
+                avg_price = float(refreshed.get("average") or limit_price)
+                if filled > 0 and (filled * avg_price) >= qty_usd * 0.95:
+                    return Fill(
+                        symbol=symbol, side=side,
+                        requested_qty_usd=qty_usd,
+                        filled_qty_usd=filled * avg_price,
+                        avg_price=avg_price, status="filled",
+                        venue_order_id=order_id, client_order_id=coid,
+                        mode=self.mode, raw=refreshed,
+                    )
+                _t.sleep(0.1)
+            try:
+                self._client.cancel_order(order_id, symbol)  # type: ignore
+            except Exception as ce:
+                log.debug("cancel after maker timeout failed: %s", ce)
+            return Fill(
+                symbol=symbol, side=side, requested_qty_usd=qty_usd,
+                filled_qty_usd=0.0, avg_price=0.0, status="rejected",
+                venue_order_id=order_id, client_order_id=coid,
+                mode=self.mode, error="maker_timeout",
+            )
+        except Exception as e:
+            log.exception("bybit maker order failed")
+            return Fill(symbol, side, qty_usd, 0.0, 0.0, "rejected", None, coid,
+                         self.mode, error=f"{type(e).__name__}: {e}")
+
+    def _persist_idempotency(self, coid: str, fill: Fill) -> None:
+        try:
+            self._idempotency_cache[coid] = {
+                "symbol": fill.symbol, "side": fill.side,
+                "requested_qty_usd": fill.requested_qty_usd,
+                "filled_qty_usd": fill.filled_qty_usd,
+                "avg_price": fill.avg_price, "status": fill.status,
+                "venue_order_id": fill.venue_order_id,
+                "client_order_id": fill.client_order_id,
+                "mode": fill.mode, "error": fill.error, "raw": fill.raw,
+            }
+            safe_json.write_json(self._ledger_path, self._idempotency_cache)
+        except Exception as e:
+            log.warning("failed to persist idempotency record: %s", e)
+
     def place_spot_taker(
         self,
         symbol: str,

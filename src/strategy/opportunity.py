@@ -36,9 +36,10 @@ from src.utils import config
 DirectionT = Literal["bybit_high", "dex_high"]
 DecisionT = Literal["GO", "SKIP"]
 
-# Conservative taker fee for Bybit spot (0.10% = 10 bps). Real value depends
-# on VIP tier and asset; can be parameterized later.
-BYBIT_TAKER_FEE_BPS = 10.0
+# Re-export from config so callers can override per-trade. Maker is the
+# default cost basis when ARB_PREFER_MAKER=1 (drops Bybit fee 10x).
+BYBIT_TAKER_FEE_BPS = config.BYBIT_TAKER_FEE_BPS
+BYBIT_MAKER_FEE_BPS = config.BYBIT_MAKER_FEE_BPS
 
 # Default per-swap gas units for a Uniswap V3 router call on Base.
 # Replaced by realized values in Phase 5 once we have execution data.
@@ -47,6 +48,13 @@ DEFAULT_DEX_GAS_UNITS = 180_000
 # Reference ETH price for converting gas (gwei) → USD.
 # Phase 1 stub; replaced with live ETHUSDT mid in Phase 6+ feature pipe.
 ETH_PRICE_USD_FALLBACK = 3000.0
+
+# Sanity ceiling on spread (bps). Anything wider screams "bad pool data,
+# wrong address, or decimal-orientation bug" — never act on it. Real arb
+# spreads on majors are 1-50 bps; long-tail can hit 100-500 bps; > 1000 bps
+# is implausible enough to be 99.99% bug. Caught the AERO-pool address bug
+# 2026-05-11 (returned garbage data showing -4 trillion bps spread).
+IMPLAUSIBLE_SPREAD_BPS = 1000.0
 
 
 @dataclass(frozen=True)
@@ -133,7 +141,15 @@ def detect_opportunity(
     pool_fee_bps: float,
     notional_usd: float = config.BANKROLL_PER_SIDE_USD * config.PER_TRADE_CAP_PCT / 100.0,
     eth_price_usd: float = ETH_PRICE_USD_FALLBACK,
+    bybit_fee_bps: float | None = None,
 ) -> Opportunity:
+    """
+    bybit_fee_bps: override the Bybit fee used in cost calc. Defaults to
+    BYBIT_MAKER_FEE_BPS if config.PREFER_MAKER else BYBIT_TAKER_FEE_BPS.
+    """
+    if bybit_fee_bps is None:
+        bybit_fee_bps = (BYBIT_MAKER_FEE_BPS if config.PREFER_MAKER
+                          else BYBIT_TAKER_FEE_BPS)
     """
     Pure decision function. Always returns an Opportunity record (never None);
     decision="GO" or "SKIP". Every call must produce a row so the dataset
@@ -148,7 +164,7 @@ def detect_opportunity(
             weighted_obi=weighted_obi, obi_delta=obi_delta,
             cancellation_rate=cancellation_rate,
             gas_gwei=gas_total_gwei, gas_cost_bps=0.0,
-            bybit_fee_bps=BYBIT_TAKER_FEE_BPS, dex_fee_bps=pool_fee_bps,
+            bybit_fee_bps=bybit_fee_bps, dex_fee_bps=pool_fee_bps,
             slippage_haircut_bps=0.0, expected_net_bps=0.0,
             notional_usd=notional_usd, theoretical_pnl_usd=0.0,
             decision="SKIP", reason="non_positive_mid",
@@ -162,13 +178,16 @@ def detect_opportunity(
     gas_cost_bps = estimate_gas_cost_bps(gas_total_gwei, notional_usd,
                                           eth_price_usd=eth_price_usd)
     slippage_bps = estimate_slippage_haircut_bps(weighted_obi, cancellation_rate)
-    total_cost_bps = (BYBIT_TAKER_FEE_BPS + pool_fee_bps + gas_cost_bps + slippage_bps)
+    total_cost_bps = (bybit_fee_bps + pool_fee_bps + gas_cost_bps + slippage_bps)
     expected_net_bps = round(gross_bps - total_cost_bps, 4)
     theoretical_pnl_usd = round(notional_usd * expected_net_bps / 10_000.0, 6)
 
     decision: DecisionT = "GO"
     reason = "passes_threshold"
-    if gross_bps < total_cost_bps:
+    if gross_bps > IMPLAUSIBLE_SPREAD_BPS:
+        decision = "SKIP"
+        reason = "implausible_spread"
+    elif gross_bps < total_cost_bps:
         decision = "SKIP"
         reason = "negative_after_costs"
     elif expected_net_bps < config.MIN_NET_BPS:
@@ -187,7 +206,7 @@ def detect_opportunity(
         cancellation_rate=cancellation_rate,
         gas_gwei=gas_total_gwei,
         gas_cost_bps=round(gas_cost_bps, 4),
-        bybit_fee_bps=BYBIT_TAKER_FEE_BPS,
+        bybit_fee_bps=bybit_fee_bps,
         dex_fee_bps=pool_fee_bps,
         slippage_haircut_bps=round(slippage_bps, 4),
         expected_net_bps=expected_net_bps,

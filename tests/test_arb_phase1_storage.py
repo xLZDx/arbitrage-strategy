@@ -159,7 +159,12 @@ def test_config_paths_are_on_d_drive() -> None:
 
 
 def test_config_pilot_pairs_match_q3() -> None:
-    assert config.PILOT_PAIRS == ("BTCUSDT", "ETHUSDT", "SOLUSDT")
+    """Q3 locked the original 3 majors; AEROUSDT was added later for the
+    long-tail/maker-fee personal-use lever (see core/PLAN.md). Both must
+    be present."""
+    expected_minimum = {"BTCUSDT", "ETHUSDT", "SOLUSDT"}
+    assert expected_minimum.issubset(set(config.PILOT_PAIRS))
+    assert "AEROUSDT" in config.PILOT_PAIRS
 
 
 def test_config_default_mode_is_shadow() -> None:
