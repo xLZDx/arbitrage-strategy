@@ -124,13 +124,15 @@ def test_aero_in_pilot_pairs() -> None:
     assert "AEROUSDT" in config.PILOT_PAIRS
 
 
-def test_aero_pool_disabled_until_verified() -> None:
-    """Pool address was wrong on first live run (returned garbage data
-    triggering -4 trillion bps spread). Disabled until verified via
-    Uniswap V3 factory lookup. The framework still supports AEROUSDT
-    everywhere else (PILOT_PAIRS, inventory) — just no live DEX feed
-    until the address is correct."""
-    assert "AEROUSDT" not in PILOT_POOLS
+def test_aero_pool_enabled_with_factory_resolved_address() -> None:
+    """Originally disabled after first live run produced garbage. Re-enabled
+    2026-05-11 with the address resolved via Uniswap V3 factory.getPool()
+    on Base mainnet."""
+    assert "AEROUSDT" in PILOT_POOLS
+    cfg = PILOT_POOLS["AEROUSDT"]
+    assert cfg.base_symbol == "AERO"
+    assert cfg.fee_bps == 500
+    assert cfg.pool_address.startswith("0x")
 
 
 def test_aero_in_inventory_assets() -> None:
@@ -180,18 +182,24 @@ def test_majors_skip_goplus_scan() -> None:
     assert rec.goplus_safe is None
 
 
-def test_goplus_skipped_when_no_pool_config() -> None:
-    """AEROUSDT no longer has a pool config (disabled until address verified).
-    Coordinator should reject with no_pool_config BEFORE running GoPlus."""
+def test_goplus_runs_for_aero_now_that_pool_is_enabled() -> None:
+    """AERO is non-major → GoPlus scanner should run. Mock the scan so the
+    test doesn't hit the live API."""
+    from src.security.goplus_scanner import ScanResult
     fake_scanner = MagicMock()
-    fake_scanner.scan = AsyncMock()
-    coord = _coord(goplus=fake_scanner)
-    coord.inventory.adjust("bybit", "AERO", 200.0)
-    coord.inventory.adjust("dex", "AERO", 200.0)
-    rec = coord.attempt(_good_opp(pair="AEROUSDT", direction="bybit_high"))
-    assert rec.outcome == "rejected_inventory"
-    assert "no_pool_config" in rec.reason
-    fake_scanner.scan.assert_not_called()
+    fake_scanner.scan = AsyncMock(
+        return_value=ScanResult(AERO_BASE, True, "clean", 95, False, None)
+    )
+    with patch.object(GoPlusScanner, "is_major",
+                       staticmethod(lambda addr: False)):
+        coord = _coord(goplus=fake_scanner)
+        coord.inventory.adjust("bybit", "AERO", 200.0)
+        coord.inventory.adjust("dex", "AERO", 200.0)
+        rec = coord.attempt(_good_opp(pair="AEROUSDT", direction="bybit_high"))
+    assert rec.goplus_scanned is True
+    assert rec.goplus_safe is True
+    assert rec.outcome == "shadow"
+    fake_scanner.scan.assert_called_once()
 
 
 def test_implausible_spread_rejected() -> None:

@@ -39,6 +39,16 @@ BYBIT_TAKER_FEE_BPS: float = 10.0
 PREFER_MAKER: bool = os.environ.get("ARB_PREFER_MAKER", "0") == "1"
 MAKER_FILL_TIMEOUT_S: float = 3.0  # if maker doesn't fill in this window → cancel + fall back to taker
 
+# Phase 8 multi-relay: when enabled, FlashbotsExecutor fans the signed tx
+# to multiple relays in parallel for better inclusion. Default off until
+# Phase 5 logs show single-relay inclusion < 95% (per Plan §8 exit).
+MULTI_RELAY: bool = os.environ.get("ARB_MULTI_RELAY", "0") == "1"
+
+# Phase 4.X auto-rebalancer: when enabled, inventory imbalance > threshold
+# triggers an actual rebalancing transfer (in SHADOW: log only).
+AUTO_REBALANCE: bool = os.environ.get("ARB_AUTO_REBALANCE", "0") == "1"
+REBALANCE_TRIGGER_PCT: float = 0.20  # imbalance > this → rebalance
+
 # Bybit symbol -> on-chain wrapped token pair on Base.
 # DEX pool addresses are filled in src/data/dex_quote.py at startup
 # (resolved via 1inch/0x token list lookup, not hardcoded here to avoid drift).

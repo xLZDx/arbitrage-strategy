@@ -106,13 +106,22 @@ PILOT_POOLS: dict[str, PoolConfig] = {
     ),
     # SOLUSDT pool address is volatile (multiple bridged-Solana issuers).
     # Phase 1.X: resolve via factory at startup.
-    # AEROUSDT: pool address 0x82321f3BEB69f503380D6B233857d5C43562e2D0
-    # was returning garbage on first live run (-4 trillion bps spread). Either
-    # wrong address or decimal-orientation bug. Disabled until verified via
-    # Uniswap V3 factory.getPool(AERO, USDC, 10000) lookup. The opportunity
-    # detector now has IMPLAUSIBLE_SPREAD_BPS guard so even if reactivated
-    # with a wrong address, it can't produce fake GO signals.
-    # "AEROUSDT": PoolConfig(...),
+    "AEROUSDT": PoolConfig(
+        # Resolved via factory.getPool(AERO, USDC, 500) on 2026-05-11.
+        # Four fee tiers existed (500/3000/10000/100); 500 is conventionally
+        # deepest for stablecoin/native pairs on Aerodrome V3.
+        # IMPLAUSIBLE_SPREAD_BPS guard catches any future drift.
+        pool_address="0xe5b5f522e98b5a2baae212d4da66b865b781db97",
+        base_symbol="AERO",
+        quote_symbol="USDC",
+        base_decimals=18,
+        quote_decimals=6,
+        base_is_token0=False,   # USDC (0x83..) < AERO (0x94..)
+        fee_bps=500,
+        bybit_pair="AEROUSDT",
+        base_address=AERO_BASE,
+        quote_address=USDC_BASE,
+    ),
 }
 
 

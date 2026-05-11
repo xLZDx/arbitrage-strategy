@@ -77,6 +77,8 @@ class TradeRecord:
     goplus_scanned: bool = False
     goplus_safe: bool | None = None        # None = not scanned (major); True/False = result
     goplus_reason: str | None = None
+    bybit_used_maker: bool = False
+    bybit_taker_fallback: bool = False    # true if maker timed out and we fell back
 
 
 def _new_trade_id() -> str:
@@ -229,11 +231,12 @@ class ArbCoordinator:
             return rec
 
         # 4. Fire both legs (Bybit immediate, DEX bundle).
+        # Maker-first if PREFER_MAKER: post a limit at our side of the spread
+        # for MAKER_FILL_TIMEOUT_S; on timeout, cancel + fall back to taker.
+        # The fallback uses a fresh trade-id suffix so idempotency is preserved.
         bybit_side = "SELL" if direction == "bybit_high" else "BUY"
-        bybit_fill = self.bybit.place_spot_taker(
-            symbol=pair, side=bybit_side,
-            qty_usd=notional, trade_id=trade_id,
-            last_price=opportunity.get("bybit_mid"),
+        bybit_fill = self._fire_bybit_leg(
+            pair, bybit_side, notional, trade_id, opportunity, rec,
         )
         rec.bybit_status = bybit_fill.status
         rec.bybit_fill_pct = bybit_fill.fill_pct
@@ -302,6 +305,52 @@ class ArbCoordinator:
     def _estimate_pnl(opportunity: dict) -> float:
         """Use the opportunity's theoretical_pnl as the SHADOW PnL stand-in."""
         return float(opportunity.get("theoretical_pnl_usd", 0.0))
+
+    def _fire_bybit_leg(
+        self,
+        pair: str,
+        side: str,
+        notional_usd: float,
+        trade_id: str,
+        opportunity: dict,
+        rec: "TradeRecord",
+    ) -> Fill:
+        """
+        Maker-first when config.PREFER_MAKER, else straight to taker.
+        On maker timeout (status='rejected', error='maker_timeout'), cancels
+        the limit and falls back to a taker market order with a distinct
+        trade_id suffix (so idempotency cache doesn't replay the dead maker).
+        """
+        last_price = opportunity.get("bybit_mid")
+        if not config.PREFER_MAKER:
+            return self.bybit.place_spot_taker(
+                symbol=pair, side=side, qty_usd=notional_usd,
+                trade_id=trade_id, last_price=last_price,
+            )
+
+        # Limit price = the cheap side of the book for our direction.
+        # SELL → quote at the ask (passive); BUY → quote at the bid.
+        bid = float(opportunity.get("bybit_bid", 0.0)) or float(last_price or 0.0)
+        ask = float(opportunity.get("bybit_ask", 0.0)) or float(last_price or 0.0)
+        limit_price = ask if side == "SELL" else bid
+        if limit_price <= 0:
+            limit_price = float(last_price or 0.0)
+
+        rec.bybit_used_maker = True
+        maker_fill = self.bybit.place_spot_maker(
+            symbol=pair, side=side, qty_usd=notional_usd,
+            trade_id=trade_id, limit_price=limit_price,
+        )
+        if maker_fill.status in ("filled", "shadow"):
+            return maker_fill
+
+        # Maker timed out (or other rejection) → taker fallback under a
+        # distinct trade_id so the idempotency ledger knows it's a new attempt.
+        rec.bybit_taker_fallback = True
+        return self.bybit.place_spot_taker(
+            symbol=pair, side=side, qty_usd=notional_usd,
+            trade_id=f"{trade_id}-taker", last_price=last_price,
+        )
 
     def _unwind_bybit(
         self,
