@@ -93,15 +93,31 @@ def utc_now_iso() -> str:
 def write_arrow(table: str, batch: pa.Table, pair: str, ts_iso: str | None = None) -> Path:
     """
     Write an Arrow table to a partitioned Parquet file under data/arb/db/<table>/.
-    Returns the file path. Caller is responsible for batching (see config.ARROW_BATCH_*).
+    Returns the file path. Caller is responsible for batching.
+
+    P3-D3 (2026-05-11): writes are ATOMIC via .tmp + os.replace().
+    Pre-fix, the ingestion writer + dashboard reader on the same `*.parquet`
+    glob could race: a DuckDB scan during a partial write would surface
+    truncated rows (NaN/missing) and crash the dashboard. Now: write to
+    `<fname>.tmp`, fsync, then atomic rename to `<fname>`. Readers either
+    see the old file (renamed away) or the complete new one, never partial.
     """
     if ts_iso is None:
         ts_iso = utc_now_iso()
     pdir = partition_path(table, ts_iso, pair)
     fname = f"part-{ts_iso.replace(':', '').replace('-', '')[:15]}.parquet"
     fpath = pdir / fname
+    tmp_fpath = fpath.with_suffix(fpath.suffix + ".tmp")
+    import os as _os
     import pyarrow.parquet as pq
-    pq.write_table(batch, fpath, compression="zstd")
+    pq.write_table(batch, tmp_fpath, compression="zstd")
+    # Force flush before rename so the OS commits the bytes
+    try:
+        with open(tmp_fpath, "rb") as f:
+            _os.fsync(f.fileno())
+    except (OSError, AttributeError):
+        pass  # fsync on Windows may fail on read-handle; ignore
+    _os.replace(tmp_fpath, fpath)
     return fpath
 
 

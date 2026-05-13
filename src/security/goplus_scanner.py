@@ -40,7 +40,11 @@ MAJORS_ALLOWLIST: frozenset[str] = frozenset({
 })
 
 TRUST_SCORE_MIN = 80
-CACHE_TTL_S = 3600  # 1 hour
+CACHE_TTL_S = 3600        # 1 hour for clean / safe results
+ERROR_CACHE_TTL_S = 60    # 1 minute for fail-closed errors
+# P3-D1 (2026-05-11): error results MUST have a short TTL. Pre-fix, a 1h API
+# blip blocked all non-major tokens for a full hour because the fail-closed
+# is_safe=False got cached at the same TTL as legit clean results.
 
 
 @dataclass(frozen=True)
@@ -82,14 +86,18 @@ class GoPlusScanner:
         entry = self._cache.get(key)
         if entry is None:
             return None
-        ts, res = entry
-        if time.time() - ts > self.cache_ttl_s:
+        ts, res, ttl = entry
+        if time.time() - ts > ttl:
             del self._cache[key]
             return None
         return res
 
     def _cache_put(self, key: str, res: ScanResult) -> None:
-        self._cache[key] = (time.time(), res)
+        # P3-D1: clean results get the full TTL (1h); error / unsafe results
+        # get a short TTL (60s) so a transient API outage doesn't block a
+        # legit token for a full hour.
+        ttl = self.cache_ttl_s if res.is_safe else ERROR_CACHE_TTL_S
+        self._cache[key] = (time.time(), res, ttl)
 
     async def scan(self, token_address: str) -> ScanResult:
         addr = token_address.lower()

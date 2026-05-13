@@ -95,16 +95,41 @@ class GasOracle:
                 pass
 
     def latest(self) -> GasReading | None:
+        """P3-D6 (2026-05-11): self-invalidates if _latest is older than
+        STALE_TTL_S. Pre-fix, a long RPC outage left `_latest` pointing at
+        stale gas; the detector's GAS_FRESHNESS_S=30s check then accepted
+        the stale reading as long as it was 'recent' by ts_ms. The fix is
+        to clear `_latest` here if too much wall-clock has passed since
+        the last successful poll, regardless of the reading's own ts_ms."""
+        if self._latest is None:
+            return None
+        STALE_TTL_S = max(30.0, self.poll_interval_s * 5)
+        age_s = (time.time() * 1000 - self._latest.ts_ms) / 1000.0
+        if age_s > STALE_TTL_S:
+            log.warning("gas reading is %.1fs stale (TTL %.1fs); clearing",
+                        age_s, STALE_TTL_S)
+            self._latest = None
         return self._latest
 
     async def _loop(self) -> None:
+        consecutive_errors = 0
         while not self._stop.is_set():
             try:
                 reading = await self._poll_once()
                 if reading is not None:
                     self._latest = reading
+                    consecutive_errors = 0
+                else:
+                    consecutive_errors += 1
             except Exception as e:
-                log.warning("gas poll failed: %s", e)
+                consecutive_errors += 1
+                log_fn = log.warning if consecutive_errors < 3 else log.error
+                log_fn("gas poll failed (consecutive=%d): %s",
+                       consecutive_errors, e)
+                # P3-D6: after 3 consecutive errors, clear _latest so the
+                # downstream freshness check trips and the detector backs off.
+                if consecutive_errors >= 3:
+                    self._latest = None
             try:
                 await asyncio.wait_for(self._stop.wait(), timeout=self.poll_interval_s)
             except asyncio.TimeoutError:

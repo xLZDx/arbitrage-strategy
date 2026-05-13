@@ -49,11 +49,34 @@ class Fill:
     error: str | None = None
     raw: dict | None = None
 
+    def __post_init__(self) -> None:
+        """P3-D5 (2026-05-11): enforce invariants the type system can't.
+        - filled_qty_usd <= requested_qty_usd * 1.05 (5% overfill tolerance
+          for exchange rounding; anything beyond that is a bug).
+        - status='filled' requires avg_price > 0 (defensive error paths
+          used to allow avg_price=0 with status=filled, corrupting downstream
+          PnL math)."""
+        if self.requested_qty_usd < 0:
+            raise ValueError(f"requested_qty_usd must be >= 0, got {self.requested_qty_usd}")
+        if self.filled_qty_usd < 0:
+            raise ValueError(f"filled_qty_usd must be >= 0, got {self.filled_qty_usd}")
+        # 5% overfill tolerance for exchange rounding quirks
+        if self.requested_qty_usd > 0 and self.filled_qty_usd > self.requested_qty_usd * 1.05:
+            raise ValueError(
+                f"overfill: filled_qty_usd={self.filled_qty_usd} > 105% of "
+                f"requested {self.requested_qty_usd}"
+            )
+        if self.status == "filled" and self.avg_price <= 0:
+            raise ValueError(
+                f"status='filled' requires avg_price > 0, got {self.avg_price}"
+            )
+
     @property
     def fill_pct(self) -> float:
         if self.requested_qty_usd <= 0:
             return 0.0
-        return self.filled_qty_usd / self.requested_qty_usd
+        # Clamp to [0, 1] — exchange overfills land in __post_init__ check
+        return min(1.0, self.filled_qty_usd / self.requested_qty_usd)
 
 
 def make_client_order_id(trade_id: str, leg: str = "bybit") -> str:
@@ -234,6 +257,17 @@ class BybitLegExecutor:
                          self.mode, error=f"{type(e).__name__}: {e}")
 
     def _persist_idempotency(self, coid: str, fill: Fill) -> None:
+        """Persist replay record.
+
+        P3-D2 (2026-05-11): the raw ccxt response (fill.raw) is intentionally
+        NOT persisted. The raw dict can include account-level fields (fee
+        breakdowns, linked wallet identifiers, IP-attributed timestamps).
+        Keep audit data in a separate JSONL log; the idempotency ledger is
+        replay-only and gets read back into memory unverified at
+        construction time — so it must not contain anything sensitive that
+        an attacker with disk access could harvest, and must not be a vector
+        for poisoning Fill(**cached) replays.
+        """
         try:
             self._idempotency_cache[coid] = {
                 "symbol": fill.symbol, "side": fill.side,
@@ -242,7 +276,9 @@ class BybitLegExecutor:
                 "avg_price": fill.avg_price, "status": fill.status,
                 "venue_order_id": fill.venue_order_id,
                 "client_order_id": fill.client_order_id,
-                "mode": fill.mode, "error": fill.error, "raw": fill.raw,
+                "mode": fill.mode, "error": fill.error,
+                # raw=None on disk; audit trail goes elsewhere if needed
+                "raw": None,
             }
             safe_json.write_json(self._ledger_path, self._idempotency_cache)
         except Exception as e:
@@ -278,20 +314,11 @@ class BybitLegExecutor:
         else:
             fill = self._live_fill(symbol, side, qty_usd, client_order_id, last_price)
 
-        # Persist idempotency record (atomic write).
-        try:
-            self._idempotency_cache[client_order_id] = {
-                "symbol": fill.symbol, "side": fill.side,
-                "requested_qty_usd": fill.requested_qty_usd,
-                "filled_qty_usd": fill.filled_qty_usd,
-                "avg_price": fill.avg_price, "status": fill.status,
-                "venue_order_id": fill.venue_order_id,
-                "client_order_id": fill.client_order_id,
-                "mode": fill.mode, "error": fill.error, "raw": fill.raw,
-            }
-            safe_json.write_json(self._ledger_path, self._idempotency_cache)
-        except Exception as e:
-            log.warning("failed to persist idempotency record: %s", e)
+        # P3-D2 (2026-05-11): route through the shared helper that strips
+        # fill.raw before persist. Pre-fix this inline copy kept the raw
+        # ccxt response on disk (sensitive account data) and was a
+        # maintenance hazard (two diverging copies of persistence logic).
+        self._persist_idempotency(client_order_id, fill)
         return fill
 
     def _shadow_fill(self, symbol, side, qty_usd, coid, last_price) -> Fill:

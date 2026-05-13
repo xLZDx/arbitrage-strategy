@@ -689,6 +689,79 @@ def model_status():
     })
 
 
+@bp.route("/zombies", methods=["GET"])
+def zombies():
+    """P3 cross-cutting: list orphan python.exe processes referencing the
+    arb project but not registered in any PID file."""
+    from src.ops.health_extras import find_zombie_processes
+    z = find_zombie_processes()
+    return jsonify({
+        "n_zombies": len(z),
+        "zombies": [
+            {"pid": p.pid, "command_line": p.command_line, "reason": p.reason}
+            for p in z
+        ],
+    })
+
+
+@bp.route("/correctness", methods=["GET"])
+def correctness():
+    """P3 cross-cutting: dashboard correctness probe — NaN/Inf/impossible
+    spread / bid>ask / missing risk caps / unknown mode. Returns findings."""
+    from src.ops.health_extras import validate_dashboard_data
+    from flask import current_app
+    findings = validate_dashboard_data(current_app.test_client())
+    return jsonify({
+        "n_findings": len(findings),
+        "findings": [
+            {"endpoint": f.endpoint, "field": f.field,
+             "issue": f.issue, "value": _safe_value(f.value)}
+            for f in findings
+        ],
+    })
+
+
+def _safe_value(v):
+    """JSON-safe coercion of CorrectnessFinding.value."""
+    if v is None or isinstance(v, (bool, int, str)):
+        return v
+    if isinstance(v, float):
+        import math
+        if math.isnan(v) or math.isinf(v):
+            return str(v)
+        return v
+    return str(v)
+
+
+@bp.route("/tft_eta", methods=["GET"])
+def tft_eta():
+    """P3 cross-cutting: TFT training ETA from REAL sister-project training
+    logs. Returns null eta_seconds if not enough data to project — explicitly
+    refuses to guess (per operator directive 2026-05-11)."""
+    from src.ops.health_extras import compute_tft_eta
+    est = compute_tft_eta()
+    return jsonify({
+        "measured_steps": est.measured_steps,
+        "total_steps": est.total_steps,
+        "mean_elapsed_per_step_s": est.mean_elapsed_per_step_s,
+        "eta_seconds": est.eta_seconds,
+        "eta_human": _human_duration(est.eta_seconds) if est.eta_seconds else None,
+        "confidence": est.confidence,
+        "source": est.source,
+        "reason": est.reason,
+    })
+
+
+def _human_duration(seconds: float) -> str:
+    if seconds < 60:
+        return f"{seconds:.0f}s"
+    if seconds < 3600:
+        return f"{seconds / 60:.1f}m"
+    if seconds < 86400:
+        return f"{seconds / 3600:.1f}h"
+    return f"{seconds / 86400:.1f}d"
+
+
 @bp.route("/risk", methods=["GET"])
 def risk_state():
     """Phase 4 — current risk state + pre-flight gate result."""

@@ -57,6 +57,12 @@ ETH_PRICE_USD_FALLBACK = 3000.0
 IMPLAUSIBLE_SPREAD_BPS = 1000.0
 
 
+# P3-D4 (2026-05-11): schema version pinned on every Opportunity row so
+# old parquet rows (with raw-tier dex_fee_bps as 500) can be detected by
+# replay tools and either rejected or migrated. v1 = pre-2026-05-11.
+OPPORTUNITY_SCHEMA_VERSION: int = 2
+
+
 @dataclass(frozen=True)
 class Opportunity:
     ts: str                 # UTC ISO8601
@@ -82,6 +88,41 @@ class Opportunity:
     decision: DecisionT
     reason: str
     eth_price_used: float
+
+    def __post_init__(self) -> None:
+        """P3-D5 (2026-05-11): enforce invariants the type system can't.
+        Failure modes pre-fix:
+        - gross_bps stored negative (sign-flip silently inverts direction)
+        - bid > ask (impossible book; bad feed → wrong arb decision)
+        - cancellation_rate outside [0,1] (drift signal corrupted)
+        - non-positive notional_usd alongside positive theoretical_pnl_usd
+          (numerator/denominator inconsistency).
+        """
+        if self.gross_bps < 0:
+            raise ValueError(f"gross_bps must be >= 0, got {self.gross_bps}")
+        if not (0.0 <= self.cancellation_rate <= 1.0):
+            raise ValueError(
+                f"cancellation_rate must be in [0,1], got {self.cancellation_rate}"
+            )
+        # Allow zero bids/asks for the "non_positive_mid" SKIP path (the
+        # detector constructs an Opportunity with zeroed values to log the
+        # rejection). Only enforce ordering when all three are positive.
+        if self.bybit_bid > 0 and self.bybit_ask > 0 and self.bybit_mid > 0:
+            if not (self.bybit_bid <= self.bybit_ask):
+                raise ValueError(
+                    f"book invariant violated: bid={self.bybit_bid} > "
+                    f"ask={self.bybit_ask}"
+                )
+            # Allow a 1-bps tolerance for stored-mid that's not exactly
+            # halfway (e.g. when mid is derived from a different snapshot)
+            tolerance = self.bybit_ask * 0.0001  # 1 bps
+            if not (self.bybit_bid - tolerance <= self.bybit_mid <= self.bybit_ask + tolerance):
+                raise ValueError(
+                    f"book invariant violated: mid={self.bybit_mid} outside "
+                    f"[bid={self.bybit_bid}, ask={self.bybit_ask}]"
+                )
+        if self.notional_usd < 0:
+            raise ValueError(f"notional_usd must be >= 0, got {self.notional_usd}")
 
 
 def estimate_gas_cost_bps(

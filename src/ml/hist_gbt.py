@@ -41,9 +41,18 @@ MIN_TRAINING_SAMPLES = 1500
 DEFAULT_EMBARGO_PCT = 0.01
 
 
+ARTIFACT_SCHEMA_VERSION: int = 2  # P3-D4 (2026-05-11): bumped at feature-schema v2
+
+
 @dataclass
 class HistGBTArtifact:
-    """Wraps the trained model + metadata for inference + auditing."""
+    """Wraps the trained model + metadata for inference + auditing.
+
+    P3-D4 (2026-05-11): `schema_version` distinguishes v1 (pre-leakage-fix,
+    14 features incl. label-leakers) from v2 (10 features, clean). Loading
+    a v1 artifact while running v2 code is an explicit error, not a silent
+    feature-dim mismatch.
+    """
     model: object  # lightgbm.LGBMClassifier
     feature_columns: tuple[str, ...]
     holdout_auc: float
@@ -52,6 +61,9 @@ class HistGBTArtifact:
     pos_rate_train: float
     trained_at: str
     veto_threshold: float = DEFAULT_VETO_THRESHOLD
+    schema_version: int = ARTIFACT_SCHEMA_VERSION
+    embargo_pct: float = 0.0          # P1-8 — recorded so audit can verify
+    pos_rate_holdout: float = 0.0     # ml-engineer #11
 
     def predict_proba(self, X: np.ndarray) -> np.ndarray:
         """Returns array of P(label=1) per row."""
@@ -176,6 +188,9 @@ def train_histgbt(
         pos_rate_train=float(np.mean(y_tr)),
         trained_at=datetime.now(timezone.utc).isoformat(),
         veto_threshold=veto_threshold,
+        schema_version=ARTIFACT_SCHEMA_VERSION,
+        embargo_pct=embargo_pct,
+        pos_rate_holdout=float(np.mean(y_hd)),
     )
 
 
