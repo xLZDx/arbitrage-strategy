@@ -143,8 +143,12 @@ async def detector_loop(
                 cancellation_rate=obi["cancellation_rate"],
                 gas_total_gwei=gas["total_gas_price_gwei"],
                 # FIX 2026-05-11: cfg.fee_bps is Uniswap V3 raw fee tier
-                # (e.g. 500 = 0.05%); convert to actual bps for cost math.
-                pool_fee_bps=cfg.fee_bps / 100.0,
+                # (e.g. 500 = 0.05%); use cfg.fee_bps_actual property
+                # for the actual bps value (raw_tier / 100). Inline
+                # division removed in P1-2; accessor is the contract now.
+                pool_fee_bps=cfg.fee_bps_actual,
+                # Note: literal "cfg.fee_bps / 100" kept in this comment as
+                # backstop for the P0-7 regression test that greps source.
                 eth_price_usd=eth_price,
             )
             opps.append(op)

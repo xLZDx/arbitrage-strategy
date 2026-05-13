@@ -56,6 +56,15 @@ class PoolConfig:
     is handled by DexPriceReader so the rest of the system always sees
     mid_price = "quote per base" matching the Bybit pair convention
     (BTCUSDT means USD per BTC).
+
+    UNIT NOTE (P1-2 2026-05-11):
+      - `fee_bps` field stores the Uniswap V3 RAW FEE TIER (500/3000/10000),
+        which actually means 0.05%/0.30%/1.00%. The name is historical; the
+        field IS the raw tier integer used in `SwapRouter02.exactInputSingle`.
+      - `uniswap_fee_tier` (property) is an alias — preferred name for new
+        code that needs the raw tier (used as the `fee` argument to V3).
+      - `fee_bps_actual` (property) is the actual bps (raw_tier / 100) used
+        in cost calculations. Use this in `detect_opportunity` calls.
     """
     pool_address: str
     base_symbol: str       # what we're pricing, e.g. "WETH", "cbBTC"
@@ -63,10 +72,21 @@ class PoolConfig:
     base_decimals: int
     quote_decimals: int
     base_is_token0: bool   # True if base-token address < quote-token address
-    fee_bps: int           # pool fee in bps (500 = 0.05%, 3000 = 0.30%)
+    fee_bps: int           # Uniswap V3 raw fee tier — 500=0.05%, 3000=0.30%
     bybit_pair: str
     base_address: str = ""    # Phase 5.X — token contract address on Base
     quote_address: str = ""   # Phase 5.X — token contract address on Base
+
+    @property
+    def uniswap_fee_tier(self) -> int:
+        """Alias for the raw Uniswap V3 fee tier. Use this for SwapRouter."""
+        return self.fee_bps
+
+    @property
+    def fee_bps_actual(self) -> float:
+        """Actual bps value for cost calculations (raw tier / 100).
+        Prevents the 100x cost over-count bug. Use this in detect_opportunity."""
+        return self.fee_bps / 100.0
 
 
 # Canonical token addresses on Base mainnet (lowercase per checksum-insensitive ABI use)

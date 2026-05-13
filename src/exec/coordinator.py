@@ -257,8 +257,21 @@ class ArbCoordinator:
         rec.dex_status = submission.status
 
         # 5. Outcome resolution
+        # P1-10 (2026-05-11): apply inventory in the right order to keep the
+        # in-memory ledger consistent with the actual exchange positions:
+        # - Both legs OK → apply both, book PnL.
+        # - Bybit OK, DEX failed → apply BYBIT side only (it really executed
+        #   on the exchange), then UNWIND fires which restores Bybit to
+        #   pre-trade state via the inverse order, leaving inventory net-flat.
+        # - Bybit failed, DEX OK → apply DEX side only (it really committed
+        #   on-chain), leaving asymmetric exposure → auto-HALT below.
+        # - Both failed → no inventory change.
         bybit_ok = bybit_fill.status in ("filled", "shadow")
         dex_ok = submission.status in ("submitted", "shadow")
+
+        # Split legs by venue so we can apply partial-success cases correctly
+        bybit_legs = [(v, a, d) for (v, a, d) in legs if v == "bybit"]
+        dex_legs = [(v, a, d) for (v, a, d) in legs if v == "dex"]
 
         if bybit_ok and dex_ok:
             self.inventory.apply(legs)
@@ -271,17 +284,35 @@ class ArbCoordinator:
                 rec.reason = "both_legs_succeeded"
             rec.realized_net_bps = float(opportunity.get("expected_net_bps", 0.0))
         elif bybit_ok and not dex_ok:
+            # Bybit really filled — record it before unwind so risk module
+            # sees the real (unhedged) exposure if anything goes wrong.
+            self.inventory.apply(bybit_legs)
             unwound = self._unwind_bybit(pair, bybit_side, notional, trade_id)
+            if unwound:
+                # Unwind = inverse Bybit order; apply the inverse legs.
+                inverse_bybit_legs = [(v, a, -d) for (v, a, d) in bybit_legs]
+                self.inventory.apply(inverse_bybit_legs)
             rec.outcome = "stuck_leg_unwound" if unwound else "stuck_leg_unrecoverable"
             rec.reason = (f"dex_failed: {submission.status}"
                           f"{' / unwind_ok' if unwound else ' / unwind_failed'}")
         elif dex_ok and not bybit_ok:
+            # DEX really committed on-chain. We hold unhedged DEX exposure.
+            self.inventory.apply(dex_legs)
             rec.outcome = "stuck_leg_unrecoverable"
             rec.reason = f"bybit_failed: {bybit_fill.status} / dex_committed"
         else:
             rec.outcome = "error"
             rec.reason = (f"both_legs_failed: bybit={bybit_fill.status}, "
                           f"dex={submission.status}")
+
+        # P1-4 SAFETY (2026-05-11): an unrecoverable stuck leg means we hold
+        # unhedged DEX exposure (or unhedged Bybit position). Without an
+        # immediate HALT, the next cycle fires normally and compounds the
+        # risk. Auto-set HALT so the operator must explicitly investigate
+        # and clear before the bot trades again.
+        if rec.outcome == "stuck_leg_unrecoverable":
+            risk.halt_set(f"stuck_leg_unrecoverable: {trade_id} ({rec.reason})")
+
         return rec
 
     # ------------------------------------------------------------------

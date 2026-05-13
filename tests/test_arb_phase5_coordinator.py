@@ -15,6 +15,7 @@ Exercises the full attempt() flow in SHADOW mode:
 
 from __future__ import annotations
 
+import os
 import shutil
 import sys
 from pathlib import Path
@@ -252,6 +253,101 @@ def test_persist_multiple_pairs_creates_separate_partitions() -> None:
     eth = arb_store.scan_table("trades", where="pair = 'ETHUSDT'")
     assert len(btc) == 1
     assert len(eth) == 1
+
+
+# --- P1-5 (2026-05-11) — stuck-leg AFTER maker fill ---------------------
+
+
+def test_stuck_leg_dex_failed_after_maker_fill_triggers_unwind() -> None:
+    """REGRESSION P1-5: when ARB_PREFER_MAKER=1, _fire_bybit_leg returns
+    a SUCCESSFUL maker fill; if DEX then fails, the unwind path must fire.
+    Pre-2026-05-11 the suite tested taker-only stuck-leg; the maker
+    success → DEX fail combination was untested.
+    """
+    import importlib
+    os.environ["ARB_PREFER_MAKER"] = "1"
+    importlib.reload(config)
+    try:
+        coord = _coord()
+        failed_dex = SubmissionResult(
+            tx_hash=None, relay="x", submitted_at_ts=0.0,
+            status="error", error="rpc_unreachable",
+        )
+        with patch.object(coord.router, "submit_signed_tx", return_value=failed_dex):
+            rec = coord.attempt(_good_opp())
+        # Maker path was used (not taker fallback) — SHADOW maker fills
+        # immediately so no fallback fires.
+        assert rec.bybit_used_maker is True, (
+            "ARB_PREFER_MAKER=1 must drive _fire_bybit_leg to maker path"
+        )
+        # The unwind must have fired for the stuck DEX
+        assert rec.outcome == "stuck_leg_unwound", (
+            f"DEX failure after maker fill should trigger unwind; got {rec.outcome}"
+        )
+        assert "dex_failed" in rec.reason
+    finally:
+        os.environ.pop("ARB_PREFER_MAKER", None)
+        importlib.reload(config)
+
+
+def test_stuck_leg_unrecoverable_auto_sets_halt() -> None:
+    """REGRESSION P1-4: an unrecoverable stuck leg must auto-HALT.
+    Pre-fix: the bot would continue firing into the next cycle while
+    holding unhedged exposure."""
+    coord = _coord()
+    failed_fill = Fill(
+        symbol="BTCUSDT", side="SELL", requested_qty_usd=50.0,
+        filled_qty_usd=0.0, avg_price=0.0, status="rejected",
+        venue_order_id=None, client_order_id="x", mode=config.MODE_SHADOW,
+        error="api_500",
+    )
+    with patch.object(coord.bybit, "place_spot_taker", return_value=failed_fill):
+        rec = coord.attempt(_good_opp())
+    assert rec.outcome == "stuck_leg_unrecoverable"
+    # P1-4: HALT must have auto-fired
+    assert risk.halt_active() is True, (
+        "P1-4 regression: stuck_leg_unrecoverable must auto-HALT to prevent "
+        "compounding unhedged exposure on the next cycle"
+    )
+    reason = risk.halt_reason() or ""
+    assert "stuck_leg_unrecoverable" in reason
+    risk.halt_clear()  # cleanup
+
+
+# --- P1-6 (2026-05-11) — HALT race between preflight and execution ------
+
+
+def test_halt_set_after_preflight_does_not_stop_in_flight_trade() -> None:
+    """Documents the EXISTING behavior: HALT is only checked at preflight.
+    If an operator hits SET HALT between preflight and bybit_leg, the
+    in-flight trade still fires. This is the expected design (mid-trade
+    HALT would leave inventory imbalanced), but documenting it as a test
+    locks in the contract so any future change to add mid-trade HALT
+    re-checks would be visible.
+    """
+    coord = _coord()
+
+    def _set_halt_mid_simulate(prepared_swap):
+        risk.halt_set("operator HALT after preflight")
+        from src.exec.bundle_simulator import SimulationResult
+        return SimulationResult(
+            success=True, gas_used=300_000, revert_reason=None,
+            mode=config.MODE_SHADOW,
+        )
+
+    with patch.object(coord.simulator, "simulate", side_effect=_set_halt_mid_simulate):
+        rec = coord.attempt(_good_opp())
+
+    # The trade DID complete — preflight passed before HALT was set.
+    # If you later add mid-trade HALT recheck, this test will fail and
+    # you'll need to decide whether the new behavior is correct.
+    assert rec.outcome == "shadow", (
+        f"Expected in-flight trade to complete (preflight already passed); "
+        f"got {rec.outcome}: {rec.reason}. If you intentionally added "
+        f"mid-trade HALT recheck, update this test."
+    )
+    assert risk.halt_active() is True  # HALT did fire — for NEXT trade
+    risk.halt_clear()
 
 
 def _run_all() -> int:

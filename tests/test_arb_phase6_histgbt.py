@@ -111,8 +111,15 @@ def test_extract_features_direction_encoding() -> None:
 def test_extract_features_hour_minute_parsing() -> None:
     f = extract_features(_opp(ts="2026-05-11T14:37:00+00:00"))
     cols = feature_columns()
-    assert f[cols.index("hour_of_day")] == 14
-    assert f[cols.index("minute_of_hour")] == 37
+    # P1-7 (2026-05-11): hour_of_day/minute_of_hour replaced by cyclical
+    # hour_sin/hour_cos. At 14:37 → hour_frac = (14 + 37/60) / 24 ≈ 0.609.
+    # sin(2π * 0.609) ≈ -0.643, cos ≈ -0.766. Verify within tolerance.
+    import math
+    hour_frac = (14 + 37 / 60.0) / 24.0
+    expected_sin = math.sin(2 * math.pi * hour_frac)
+    expected_cos = math.cos(2 * math.pi * hour_frac)
+    assert abs(f[cols.index("hour_sin")] - expected_sin) < 1e-9
+    assert abs(f[cols.index("hour_cos")] - expected_cos) < 1e-9
 
 
 def test_extract_features_log_notional_grows() -> None:
@@ -186,15 +193,29 @@ def _toy_dataset(n: int = 60):
 
 def test_train_histgbt_returns_artifact() -> None:
     X, y, ts = _toy_dataset()
-    art = train_histgbt(X, y, timestamps=ts, n_estimators=50)
+    art = train_histgbt(X, y, timestamps=ts, n_estimators=50,
+                         require_min_samples=False, embargo_pct=0.0)
     assert isinstance(art, HistGBTArtifact)
+    # No embargo → train + holdout covers all of X
     assert art.n_train + art.n_holdout == len(X)
     assert art.feature_columns == FEATURE_COLUMNS
 
 
+def test_train_histgbt_embargo_drops_samples() -> None:
+    """P1-8 regression: with embargo, train + holdout < n (embargo'd rows
+    are excluded from training). Crucial for AFML walk-forward integrity."""
+    X, y, ts = _toy_dataset(n=100)
+    art = train_histgbt(X, y, timestamps=ts, n_estimators=10,
+                         require_min_samples=False, embargo_pct=0.05)
+    # holdout 20% = 20, embargo 5% = 5, train = 100 - 20 - 5 = 75
+    assert art.n_holdout == 20
+    assert art.n_train == 75
+    assert art.n_train + art.n_holdout == 95  # 5 embargo'd
+
+
 def test_train_histgbt_holdout_auc_above_random() -> None:
     X, y, ts = _toy_dataset(n=100)
-    art = train_histgbt(X, y, timestamps=ts, n_estimators=100)
+    art = train_histgbt(X, y, timestamps=ts, n_estimators=100, require_min_samples=False)
     assert art.holdout_auc > 0.6, f"toy AUC too low: {art.holdout_auc}"
 
 
@@ -202,18 +223,32 @@ def test_train_histgbt_rejects_single_class() -> None:
     X, _, ts = _toy_dataset()
     y = np.zeros(len(X), dtype=np.int32)  # all zeros
     try:
-        train_histgbt(X, y, timestamps=ts)
+        train_histgbt(X, y, timestamps=ts, require_min_samples=False)
     except ValueError as e:
         assert "both classes" in str(e)
         return
     assert False
 
 
-def test_train_histgbt_rejects_too_few_samples() -> None:
+def test_train_histgbt_rejects_below_min_samples() -> None:
+    """P1-9 (2026-05-11): production training floor is 1500 samples.
+    The pre-fix '>=20' bar permitted overfitted toy models."""
+    X = np.random.randn(60, len(FEATURE_COLUMNS))
+    y = np.array([0, 1] * 30)
+    try:
+        train_histgbt(X, y, n_estimators=10)  # default require_min_samples=True
+    except ValueError as e:
+        assert ">= 1500" in str(e), f"expected >=1500 error, got: {e}"
+        return
+    assert False
+
+
+def test_train_histgbt_hard_floor_20_even_under_override() -> None:
+    """Even with require_min_samples=False, the hard split-math floor is 20."""
     X = np.random.randn(10, len(FEATURE_COLUMNS))
     y = np.array([0, 1] * 5)
     try:
-        train_histgbt(X, y, n_estimators=10)
+        train_histgbt(X, y, n_estimators=10, require_min_samples=False)
     except ValueError as e:
         assert ">= 20" in str(e)
         return
@@ -222,7 +257,7 @@ def test_train_histgbt_rejects_too_few_samples() -> None:
 
 def test_predict_proba_shape() -> None:
     X, y, ts = _toy_dataset()
-    art = train_histgbt(X, y, timestamps=ts, n_estimators=50)
+    art = train_histgbt(X, y, timestamps=ts, n_estimators=50, require_min_samples=False)
     p = art.predict_proba(X[:5])
     assert p.shape == (5,)
     assert ((p >= 0.0) & (p <= 1.0)).all()
@@ -230,7 +265,7 @@ def test_predict_proba_shape() -> None:
 
 def test_predict_proba_dim_mismatch_raises() -> None:
     X, y, ts = _toy_dataset()
-    art = train_histgbt(X, y, timestamps=ts, n_estimators=50)
+    art = train_histgbt(X, y, timestamps=ts, n_estimators=50, require_min_samples=False)
     bad = np.zeros((1, len(FEATURE_COLUMNS) - 2))
     try:
         art.predict_proba(bad)
@@ -243,7 +278,7 @@ def test_predict_proba_dim_mismatch_raises() -> None:
 def test_veto_returns_decision_and_p() -> None:
     X, y, ts = _toy_dataset()
     art = train_histgbt(X, y, timestamps=ts, n_estimators=50,
-                         veto_threshold=0.50)
+                         veto_threshold=0.50, require_min_samples=False)
     vetoed, p = art.veto(X[0])
     assert isinstance(vetoed, bool)
     assert 0.0 <= p <= 1.0
@@ -255,7 +290,7 @@ def test_veto_returns_decision_and_p() -> None:
 
 def test_save_load_roundtrip() -> None:
     X, y, ts = _toy_dataset()
-    art = train_histgbt(X, y, timestamps=ts, n_estimators=50)
+    art = train_histgbt(X, y, timestamps=ts, n_estimators=50, require_min_samples=False)
     with tempfile.NamedTemporaryFile(suffix=".joblib", delete=False) as f:
         tmp_path = Path(f.name)
     try:
@@ -323,7 +358,8 @@ def test_coordinator_model_high_proba_passes() -> None:
     """A trained model that returns high P should NOT veto."""
     X, y, ts = _toy_dataset()
     art = train_histgbt(X, y, timestamps=ts, n_estimators=50,
-                         veto_threshold=0.0)  # never vetoes
+                         veto_threshold=0.0,  # never vetoes
+                         require_min_samples=False)
     coord = _coord(histgbt=art)
     rec = coord.attempt(_good_opp())
     assert rec.outcome == "shadow"
@@ -334,7 +370,8 @@ def test_coordinator_model_high_proba_passes() -> None:
 def test_coordinator_model_low_proba_vetoes() -> None:
     X, y, ts = _toy_dataset()
     art = train_histgbt(X, y, timestamps=ts, n_estimators=50,
-                         veto_threshold=1.01)  # always vetoes (P never > 1)
+                         veto_threshold=1.01,  # always vetoes (P never > 1)
+                         require_min_samples=False)
     coord = _coord(histgbt=art)
     rec = coord.attempt(_good_opp())
     assert rec.outcome == "rejected_preflight"

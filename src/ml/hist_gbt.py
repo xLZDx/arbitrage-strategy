@@ -28,7 +28,17 @@ from src.utils import config
 log = logging.getLogger(__name__)
 
 DEFAULT_MODEL_FILENAME = "hist_gbt_v1.joblib"
-DEFAULT_VETO_THRESHOLD = 0.55  # below this → REJECT
+DEFAULT_VETO_THRESHOLD = 0.55  # below this -> REJECT
+
+# P1-9 (2026-05-11): training data floor. AFML guidance says >=100 samples
+# per feature; with 10 features that's 1000. We pick 1500 as a conservative
+# floor that also ensures meaningful holdout CI on AUC.
+MIN_TRAINING_SAMPLES = 1500
+
+# P1-8 (2026-05-11): embargo size for PurgedKFold. Default = 1% of n_samples.
+# For ~6 opps/sec, 1% of 1500 = 15 samples ≈ 2.5 seconds of embargo, ample
+# for atomic arb whose label horizon is sub-second to seconds.
+DEFAULT_EMBARGO_PCT = 0.01
 
 
 @dataclass
@@ -71,9 +81,19 @@ def train_histgbt(
     num_leaves: int = 31,
     holdout_pct: float = 0.20,
     random_state: int = 42,
+    embargo_pct: float = DEFAULT_EMBARGO_PCT,
+    require_min_samples: bool = True,
 ) -> HistGBTArtifact:
     """
-    Walk-forward train: holdout is the last N% chronologically.
+    Walk-forward train with EMBARGO purging (AFML Ch. 7).
+
+    Holdout is the last N% chronologically; train is the first (100-N)%
+    MINUS the embargo window immediately before the holdout. This stops
+    autocorrelated samples within `embargo_pct * n` of the holdout
+    boundary from leaking into training.
+
+    P1-9 (2026-05-11): refuses to train with < MIN_TRAINING_SAMPLES unless
+    require_min_samples=False (override only for unit tests).
     """
     from datetime import datetime, timezone
     import lightgbm as lgb  # type: ignore
@@ -85,26 +105,50 @@ def train_histgbt(
             f"need both classes in training data; got only {set(y.tolist())}. "
             "Capture more trades (mix of GO and SKIP) before training."
         )
-    if len(X) < 20:
-        raise ValueError(f"need >= 20 samples to train, got {len(X)}")
+    n = len(X)
+    if require_min_samples and n < MIN_TRAINING_SAMPLES:
+        raise ValueError(
+            f"need >= {MIN_TRAINING_SAMPLES} samples to train (got {n}). "
+            f"AFML guidance: >=100 samples per feature. With 10 features the "
+            f"floor is 1000; we use 1500 for conservative holdout CI. "
+            f"Either capture more GO trades or pass require_min_samples=False "
+            f"for testing (NOT for production)."
+        )
+    # Hard minimum even under override: >=20 for the split math.
+    if n < 20:
+        raise ValueError(f"need >= 20 samples to train, got {n}")
 
     # Walk-forward split: sort by timestamp if given, else use natural order.
     if timestamps is not None:
         order = np.argsort(timestamps)
         X = X[order]
         y = y[order]
-    n_holdout = max(1, int(round(len(X) * holdout_pct)))
-    n_train = len(X) - n_holdout
-    X_tr, X_hd = X[:n_train], X[n_train:]
-    y_tr, y_hd = y[:n_train], y[n_train:]
-    if len(np.unique(y_tr)) < 2 or len(np.unique(y_hd)) < 2:
-        # Fall back to random shuffle if walk-forward leaves single-class splits
-        rng = np.random.RandomState(random_state)
-        idx = rng.permutation(len(X))
-        X = X[idx]
-        y = y[idx]
-        X_tr, X_hd = X[:n_train], X[n_train:]
-        y_tr, y_hd = y[:n_train], y[n_train:]
+    n_holdout = max(1, int(round(n * holdout_pct)))
+    embargo_count = max(0, int(round(n * embargo_pct)))
+    n_train = max(1, n - n_holdout - embargo_count)
+    X_tr = X[:n_train]
+    y_tr = y[:n_train]
+    X_hd = X[n - n_holdout:]
+    y_hd = y[n - n_holdout:]
+    embargo_rows = embargo_count  # captured for the artifact metadata
+
+    walk_forward_ok = (len(np.unique(y_tr)) >= 2 and len(np.unique(y_hd)) >= 2)
+    if not walk_forward_ok:
+        # P1-8 (2026-05-11): the random-shuffle fallback IS a look-ahead
+        # violation. We refuse to use it for production training and instead
+        # surface the imbalance to the operator. Tests can override via
+        # require_min_samples=False AND will still hit this if data is bad.
+        log.error(
+            "PurgedKFold walk-forward produced a single-class fold "
+            "(train classes=%s, holdout classes=%s). Refusing to fall back "
+            "to random shuffle — that would inject look-ahead bias. Fix: "
+            "capture more diverse data (mix of GO/SKIP, longer time span).",
+            set(y_tr.tolist()), set(y_hd.tolist()),
+        )
+        raise ValueError(
+            "walk-forward split produced a single-class fold; refusing "
+            "random-shuffle fallback (look-ahead bias). Re-run with more data."
+        )
 
     model = lgb.LGBMClassifier(
         n_estimators=n_estimators,
@@ -112,6 +156,7 @@ def train_histgbt(
         num_leaves=num_leaves,
         random_state=random_state,
         verbose=-1,
+        class_weight="balanced",  # ml-engineer recommendation
     )
     model.fit(X_tr, y_tr)
 
@@ -137,23 +182,82 @@ def train_histgbt(
 # --- Persistence ---------------------------------------------------------
 
 
+def _sha256_of_file(path: Path) -> str:
+    """Return hex SHA-256 digest of file contents."""
+    import hashlib
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(65536), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _manifest_path(artifact_path: Path) -> Path:
+    return artifact_path.with_suffix(artifact_path.suffix + ".sha256")
+
+
 def save_artifact(artifact: HistGBTArtifact,
                   path: Path | str | None = None) -> Path:
+    """Persist + write a SHA-256 manifest sibling file (P1-3 RCE prevention).
+
+    The manifest is a single line with the hex digest. `load_artifact`
+    verifies the file's current digest matches before deserializing —
+    a supply-chain swap or path-traversal write of the artifact file
+    raises RuntimeError rather than executing arbitrary Python via joblib."""
     import joblib  # type: ignore
     if path is None:
         path = config.MODEL_DIR / DEFAULT_MODEL_FILENAME
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     joblib.dump(artifact, path)
+    # Write integrity manifest next to the artifact
+    digest = _sha256_of_file(path)
+    _manifest_path(path).write_text(digest + "\n", encoding="utf-8")
     return path
 
 
-def load_artifact(path: Path | str | None = None) -> HistGBTArtifact | None:
-    """Returns None if no model exists yet (vs raising)."""
+def load_artifact(path: Path | str | None = None,
+                  verify_integrity: bool = True) -> HistGBTArtifact | None:
+    """Returns None if no model exists yet (vs raising).
+
+    SAFETY (P1-3 2026-05-11): when verify_integrity=True (default), the
+    file's current SHA-256 is compared to the manifest written by
+    save_artifact. Mismatch -> RuntimeError, NO deserialization. This
+    blocks a supply-chain RCE where a malicious artifact file would
+    execute arbitrary Python at joblib.load time.
+
+    verify_integrity=False is allowed for first-run loading of legacy
+    artifacts that pre-date the manifest format; emit WARNING."""
     import joblib  # type: ignore
     if path is None:
         path = config.MODEL_DIR / DEFAULT_MODEL_FILENAME
     p = Path(path)
     if not p.exists():
         return None
-    return joblib.load(p)
+
+    if verify_integrity:
+        manifest = _manifest_path(p)
+        if not manifest.exists():
+            log.warning(
+                "Model %s has no SHA-256 manifest; refusing to load. "
+                "Either regenerate via save_artifact() or pass "
+                "verify_integrity=False (audit risk).", p)
+            raise RuntimeError(
+                f"missing integrity manifest for {p}; refusing joblib.load"
+            )
+        expected = manifest.read_text(encoding="utf-8").strip()
+        actual = _sha256_of_file(p)
+        if expected != actual:
+            raise RuntimeError(
+                f"artifact integrity check FAILED for {p}: "
+                f"expected SHA-256 {expected[:16]}..., got {actual[:16]}..."
+                " — possible supply-chain attack; refusing joblib.load"
+            )
+
+    artifact = joblib.load(p)
+    if not isinstance(artifact, HistGBTArtifact):
+        raise RuntimeError(
+            f"deserialized object is {type(artifact).__name__}, "
+            f"expected HistGBTArtifact"
+        )
+    return artifact

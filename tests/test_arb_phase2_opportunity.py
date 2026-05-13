@@ -160,17 +160,34 @@ def test_pool_fee_3000_raw_tier_also_blocked() -> None:
 
 
 def test_detector_main_does_the_fee_conversion() -> None:
-    """Regression: detector_main.py MUST divide cfg.fee_bps by 100 before
-    passing to detect_opportunity. This locks the conversion into the
-    production callsite, not just documentation."""
+    """Regression: detector_main.py MUST convert cfg.fee_bps from Uniswap
+    raw fee tier to actual bps before passing to detect_opportunity. The
+    contract is satisfied by EITHER:
+      - inline division: cfg.fee_bps / 100
+      - the dedicated accessor: cfg.fee_bps_actual (added in P1-2)
+    Both are acceptable; the test fails only if neither appears."""
     import inspect
     from src.strategy import detector_main
     source = inspect.getsource(detector_main)
-    assert "cfg.fee_bps / 100" in source or "cfg.fee_bps/100" in source, (
-        "detector_main.py must explicitly divide cfg.fee_bps by 100 when "
-        "calling detect_opportunity — the unit conversion is the entire "
-        "fix for the 2026-05-11 bug."
+    has_inline_div = ("cfg.fee_bps / 100" in source
+                      or "cfg.fee_bps/100" in source)
+    has_accessor = "cfg.fee_bps_actual" in source
+    assert has_inline_div or has_accessor, (
+        "detector_main.py must convert cfg.fee_bps from raw Uniswap tier "
+        "to actual bps. Use cfg.fee_bps_actual (preferred) or inline "
+        "cfg.fee_bps / 100. The unit conversion is the entire fix for "
+        "the 2026-05-11 100x cost overcount bug."
     )
+
+
+def test_pool_config_fee_bps_actual_accessor() -> None:
+    """REGRESSION P1-2: PoolConfig.fee_bps_actual returns the bps value
+    (raw_tier / 100), preventing the unit-confusion landmine."""
+    from src.data.dex_quote import PILOT_POOLS
+    eth_cfg = PILOT_POOLS["ETHUSDT"]
+    assert eth_cfg.fee_bps == 500  # raw Uniswap tier
+    assert eth_cfg.fee_bps_actual == 5.0  # actual bps
+    assert eth_cfg.uniswap_fee_tier == 500  # alias confirmation
 
 
 def test_detect_zero_mid_returns_skip() -> None:

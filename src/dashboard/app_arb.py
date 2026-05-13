@@ -544,6 +544,34 @@ def create_app() -> Flask:
     app = Flask(__name__)
     app.register_blueprint(arb_bp)
 
+    # P1-1 SAFETY (2026-05-11): require X-API-Key header on state-mutating
+    # POST endpoints when ARB_API_KEY is configured. GET routes stay open
+    # (read-only). When the key is unset, log a startup warning but allow
+    # all requests (localhost dev mode). Mirrors trading-bot dashboard pattern.
+    @app.before_request
+    def _enforce_api_key():
+        from flask import request, jsonify
+        if request.method == "GET":
+            return None
+        # Allow specific GET-equivalent POSTs that just read data; keep
+        # state-mutating ones gated.
+        api_key = os.environ.get("ARB_API_KEY")
+        if not api_key:
+            return None  # dev mode — no key configured, allow all
+        provided = request.headers.get("X-API-Key", "")
+        if provided != api_key:
+            return jsonify({
+                "error": "unauthorized",
+                "detail": "Set X-API-Key header to match ARB_API_KEY env var",
+            }), 401
+        return None
+
+    if not os.environ.get("ARB_API_KEY"):
+        log.warning(
+            "ARB_API_KEY not set — dashboard POSTs are unauthenticated. "
+            "Set ARB_API_KEY in .env for any exposed deployment."
+        )
+
     @app.route("/")
     def index():
         return render_template_string(INDEX_HTML)

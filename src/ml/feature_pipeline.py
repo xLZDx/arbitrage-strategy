@@ -15,24 +15,37 @@ from typing import Sequence
 import numpy as np
 
 # Order matters: model is trained on this order, must predict in same order.
-FEATURE_COLUMNS: tuple[str, ...] = (
-    "spread_bps",
-    "gross_bps",
-    "weighted_obi",
-    "obi_delta",
-    "cancellation_rate",
-    "gas_gwei",
-    "gas_cost_bps",
-    "slippage_haircut_bps",
-    "expected_net_bps",
-    "notional_usd",
-    "is_bybit_high",        # 0/1 encoding of direction
-    "hour_of_day",          # parsed from ts
-    "minute_of_hour",
-    "log_notional",         # robust against scale jumps
-    # Phase 7 will append tft_60s_pred at the end (additive — Phase 6 models
-    # without TFT continue to work; Phase 7 models extend the schema).
+#
+# AFML FEATURE-DESIGN NOTE (P1-7 2026-05-11):
+# The original feature set included `expected_net_bps`, `gross_bps`,
+# `gas_cost_bps`, and `slippage_haircut_bps`. Those are the cost-stack
+# OUTPUTS — the same numbers the simulator uses to compute the label
+# `realized_pnl_usd > 0`. Including them as features causes label leakage:
+# the model learns the decision rule, not edge. They are DROPPED in v2.
+# The dropped names live in FEATURE_COLUMNS_V1 for backward compat with
+# older artifacts (see HistGBTArtifact.schema_version).
+FEATURE_COLUMNS_V1: tuple[str, ...] = (
+    "spread_bps", "gross_bps", "weighted_obi", "obi_delta",
+    "cancellation_rate", "gas_gwei", "gas_cost_bps", "slippage_haircut_bps",
+    "expected_net_bps", "notional_usd", "is_bybit_high", "hour_of_day",
+    "minute_of_hour", "log_notional",
 )
+
+# v2 — label-leakage-clean. 9 features instead of 14.
+FEATURE_COLUMNS: tuple[str, ...] = (
+    "spread_bps",          # signed spread; market state, not a cost output
+    "weighted_obi",        # microstructure signal
+    "obi_delta",           # microstructure derivative
+    "cancellation_rate",   # spoofing detector
+    "gas_gwei",            # raw gas; NOT gas_cost_bps (which is computed from notional)
+    "notional_usd",        # trade size
+    "is_bybit_high",       # 0/1 encoding of direction
+    "hour_sin",            # cyclical encoding (replaces hour_of_day)
+    "hour_cos",
+    "log_notional",        # robust against scale jumps
+    # Phase 7 appends tft_60s_pred at the end (additive).
+)
+FEATURE_SCHEMA_VERSION: int = 2
 
 
 def _hour_minute(ts: str) -> tuple[int, int]:
@@ -48,7 +61,7 @@ def _hour_minute(ts: str) -> tuple[int, int]:
 
 def extract_features(opportunity: dict, tft_60s_pred: float | None = None) -> np.ndarray:
     """
-    Build a single-row feature vector.
+    Build a single-row feature vector (v2 schema, leakage-clean).
 
     tft_60s_pred: optional Phase-7 TFT output. None → column omitted (matches
     Phase 6 schema). Provided → appended (matches Phase 7 schema).
@@ -57,21 +70,21 @@ def extract_features(opportunity: dict, tft_60s_pred: float | None = None) -> np
     direction = opportunity.get("direction", "bybit_high")
     notional = max(0.01, float(opportunity.get("notional_usd", 0.0)))
     hh, mm = _hour_minute(opportunity.get("ts", ""))
+    # Cyclical hour encoding so minute-59 → minute-0 isn't a max-distance jump.
+    hour_frac = (hh + mm / 60.0) / 24.0
+    hour_sin = float(np.sin(2 * np.pi * hour_frac))
+    hour_cos = float(np.cos(2 * np.pi * hour_frac))
 
     base = [
         spread,
-        float(opportunity.get("gross_bps", abs(spread))),
         float(opportunity.get("weighted_obi", 0.0)),
         float(opportunity.get("obi_delta", 0.0)),
         float(opportunity.get("cancellation_rate", 0.0)),
         float(opportunity.get("gas_gwei", 0.0)),
-        float(opportunity.get("gas_cost_bps", 0.0)),
-        float(opportunity.get("slippage_haircut_bps", 0.0)),
-        float(opportunity.get("expected_net_bps", 0.0)),
         notional,
         1.0 if direction == "bybit_high" else 0.0,
-        float(hh),
-        float(mm),
+        hour_sin,
+        hour_cos,
         float(np.log1p(notional)),
     ]
     if tft_60s_pred is not None:
