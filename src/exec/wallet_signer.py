@@ -65,7 +65,20 @@ class WalletSigner:
     # ------------------------------------------------------------------
 
     def _ensure_account(self):
+        """Lazy-load private key + derive account. Lifts the key per-call so
+        a key rotation takes effect on the next sign.
+
+        SAFETY (regression for P0-5 2026-05-11): MAINNET mode now enforces
+        the same `ARB_MAINNET_GATE=1` gate that BybitLegExecutor has. Pre-fix,
+        a caller that constructed WalletSigner(mode='MAINNET') directly
+        bypassed the double-defense flag entirely.
+        """
         if self._account is None:
+            if self.mode == config.MODE_MAINNET and os.environ.get("ARB_MAINNET_GATE") != "1":
+                raise RuntimeError(
+                    "WalletSigner refused MAINNET sign: ARB_MAINNET_GATE=1 not set. "
+                    "This is a deliberate second-defense flag — set it explicitly."
+                )
             from eth_account import Account  # type: ignore
             priv = os.environ.get(self.private_key_env)
             if not priv:

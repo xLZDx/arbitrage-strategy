@@ -79,10 +79,34 @@ WITHDRAWALS_ENABLED: bool = os.environ.get("ARB_WITHDRAWALS_ENABLED", "0") == "1
 # --- Venue -----------------------------------------------------------------
 
 VENUE_CHAIN = "base"
-BASE_RPC_URL: str = os.environ.get(
-    "BASE_RPC_URL", "https://mainnet.base.org"  # public default; override in .env
-)
-BASE_CHAIN_ID = 8453
+BASE_MAINNET_RPC = "https://mainnet.base.org"
+BASE_TESTNET_RPC = "https://sepolia.base.org"
+BASE_MAINNET_CHAIN_ID = 8453
+BASE_TESTNET_CHAIN_ID = 84532  # Base Sepolia
+
+# Safety (regression for P0-6 2026-05-11): default the RPC URL to the right
+# chain for the current execution mode so an under-specified .env can't
+# accidentally sign+broadcast against mainnet from a testnet key.
+_explicit_rpc = os.environ.get("BASE_RPC_URL")
+if _explicit_rpc:
+    BASE_RPC_URL: str = _explicit_rpc
+    BASE_CHAIN_ID: int = BASE_TESTNET_CHAIN_ID if "sepolia" in _explicit_rpc.lower() else BASE_MAINNET_CHAIN_ID
+elif os.environ.get("ARB_MODE") == "TESTNET":
+    BASE_RPC_URL = BASE_TESTNET_RPC
+    BASE_CHAIN_ID = BASE_TESTNET_CHAIN_ID
+else:
+    BASE_RPC_URL = BASE_MAINNET_RPC
+    BASE_CHAIN_ID = BASE_MAINNET_CHAIN_ID
+
+
+def assert_rpc_matches_mode() -> None:
+    """Refuse to start if TESTNET mode resolved to a mainnet RPC URL.
+    Called from executor startup."""
+    if EXECUTION_MODE == MODE_TESTNET and "mainnet" in BASE_RPC_URL.lower():
+        raise RuntimeError(
+            f"ARB_MODE=TESTNET but BASE_RPC_URL={BASE_RPC_URL} looks like mainnet. "
+            f"Set BASE_RPC_URL=https://sepolia.base.org or unset it for the default."
+        )
 
 # --- WebSocket / ingestion -------------------------------------------------
 

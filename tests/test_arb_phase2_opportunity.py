@@ -114,6 +114,65 @@ def test_detect_returns_opportunity_record() -> None:
     assert op.pair == "BTCUSDT"
 
 
+# --- P0-7 regression: dex_fee unit confusion (was 100x bug) ---------------
+
+
+def test_pool_fee_raw_tier_500_passed_as_bps_skips_everything() -> None:
+    """REGRESSION for the 2026-05-11 100x dex_fee bug.
+    Uniswap V3 raw fee tier 500 means 0.05% = 5 bps. If a future caller
+    passes 500 directly into detect_opportunity (treating it as bps), the
+    cost stack inflates by ~100x and every spread gets SKIP-negative_after_costs.
+    Production callers (detector_main.py) MUST convert via cfg.fee_bps / 100.0."""
+    # Clear-profit spread (~100 bps gross) that would normally GO at 5 bps fee
+    op_correct = detect_opportunity(**_kwargs(dex_mid=79200.0, pool_fee_bps=5.0))
+    assert op_correct.decision == "GO", (
+        f"5 bps pool fee MUST allow GO on 100 bps spread; "
+        f"got SKIP reason={op_correct.reason}, "
+        f"expected_net_bps={op_correct.expected_net_bps}"
+    )
+
+    # SAME spread, but caller forgot to convert: passes 500 as bps directly
+    op_wrong = detect_opportunity(**_kwargs(dex_mid=79200.0, pool_fee_bps=500.0))
+    assert op_wrong.decision == "SKIP", (
+        f"Raw V3 fee tier 500 passed as bps MUST SKIP (cost ~516 bps > gross 100 bps); "
+        f"got GO with expected_net_bps={op_wrong.expected_net_bps}. "
+        f"This is the exact pre-fix bug — regression detected."
+    )
+    assert op_wrong.dex_fee_bps == 500.0, (
+        "The inflation should be visible in the persisted record so audit "
+        "tools can detect the mis-call after the fact."
+    )
+    # The bug is invisible in the SKIP reason if we don't surface it explicitly;
+    # but the magnitude is detectable: cost-after-fee should exceed gross.
+    cost_total = (op_wrong.bybit_fee_bps + op_wrong.dex_fee_bps
+                  + op_wrong.gas_cost_bps + op_wrong.slippage_haircut_bps)
+    assert cost_total > op_wrong.gross_bps, (
+        f"With raw tier as bps, total cost ({cost_total:.1f}) MUST exceed "
+        f"gross ({op_wrong.gross_bps:.1f}) — that's the bug signature."
+    )
+
+
+def test_pool_fee_3000_raw_tier_also_blocked() -> None:
+    """The 0.30% tier (3000 raw) similarly explodes the cost stack if mis-passed."""
+    op_correct = detect_opportunity(**_kwargs(dex_mid=79200.0, pool_fee_bps=30.0))
+    op_wrong = detect_opportunity(**_kwargs(dex_mid=79200.0, pool_fee_bps=3000.0))
+    assert op_correct.expected_net_bps > op_wrong.expected_net_bps + 2000
+
+
+def test_detector_main_does_the_fee_conversion() -> None:
+    """Regression: detector_main.py MUST divide cfg.fee_bps by 100 before
+    passing to detect_opportunity. This locks the conversion into the
+    production callsite, not just documentation."""
+    import inspect
+    from src.strategy import detector_main
+    source = inspect.getsource(detector_main)
+    assert "cfg.fee_bps / 100" in source or "cfg.fee_bps/100" in source, (
+        "detector_main.py must explicitly divide cfg.fee_bps by 100 when "
+        "calling detect_opportunity — the unit conversion is the entire "
+        "fix for the 2026-05-11 bug."
+    )
+
+
 def test_detect_zero_mid_returns_skip() -> None:
     op = detect_opportunity(**_kwargs(bybit_bid=0.0, bybit_ask=0.0))
     assert op.decision == "SKIP"

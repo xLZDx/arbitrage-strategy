@@ -189,11 +189,17 @@ class ArbCoordinator:
         # inside the scanner; long-tail tokens hit the API and fail closed
         # on revert/timeout. This is the personal-use safety net for the
         # AERO/long-tail pairs.
+        #
+        # SAFETY (regression for P0-4 2026-05-11): we used to call
+        # `asyncio.run(self.goplus.scan(...))` which raises
+        # "This event loop is already running" if attempt() is invoked from
+        # any async caller (FastAPI, pytest-asyncio, the detector loop).
+        # The outer except then silently REJECTed the trade as goplus_error.
+        # Now we detect the loop state and pick the right execution path.
         if pool_cfg.base_address and not GoPlusScanner.is_major(pool_cfg.base_address):
             rec.goplus_scanned = True
             try:
-                import asyncio
-                scan = asyncio.run(self.goplus.scan(pool_cfg.base_address))
+                scan = self._run_async(self.goplus.scan(pool_cfg.base_address))
                 rec.goplus_safe = scan.is_safe
                 rec.goplus_reason = scan.reason
                 if not scan.is_safe:
@@ -279,6 +285,31 @@ class ArbCoordinator:
         return rec
 
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _run_async(coro):
+        """Run an awaitable from a sync method, handling both async and sync
+        caller contexts.
+
+        - No running loop → use `asyncio.run`.
+        - Running loop (detector task, FastAPI handler, pytest-asyncio) →
+          run the coro on a dedicated thread's loop so we don't collide
+          with the calling loop. This is the standard sync-from-async
+          escape hatch.
+        """
+        import asyncio
+        try:
+            asyncio.get_running_loop()
+            running_loop = True
+        except RuntimeError:
+            running_loop = False
+        if not running_loop:
+            return asyncio.run(coro)
+        # Inside a running loop: dispatch to a worker thread with its own loop.
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+            fut = ex.submit(asyncio.run, coro)
+            return fut.result()
 
     @staticmethod
     def _inventory_legs(pair: str, direction: str, notional_usd: float):

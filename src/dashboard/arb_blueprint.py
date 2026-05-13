@@ -30,7 +30,7 @@ from pathlib import Path
 from flask import Blueprint, jsonify, request
 
 from src.storage import arb_store
-from src.utils import config
+from src.utils import config, safe_json
 
 log = logging.getLogger(__name__)
 
@@ -460,12 +460,22 @@ def train_histgbt_endpoint():
 
 @bp.route("/run_drill", methods=["POST"])
 def run_drill_endpoint():
-    """Risk drill — equivalent to scripts/risk_drill.py, returns 8 check results."""
+    """Risk drill — equivalent to scripts/risk_drill.py, returns 8 check results.
+
+    SAFETY (regression for P0-2 2026-05-11): snapshot any live HALT BEFORE the
+    drill clears it, and restore it AFTER. Previously the drill unconditionally
+    cleared the HALT flag, which let an operator silently bypass the kill
+    switch by clicking 'Run drill' in the dashboard.
+    """
     from src.risk import limits as rl
     checks = []
 
     def _record(name: str, ok: bool, detail: str = ""):
         checks.append({"name": name, "ok": ok, "detail": detail})
+
+    # Snapshot any pre-existing live HALT so we can restore it.
+    prior_halt_active = rl.halt_active()
+    prior_halt_reason = rl.halt_reason() if prior_halt_active else None
 
     rl.halt_clear()
     state = rl.RiskState()
@@ -522,7 +532,11 @@ def run_drill_endpoint():
     gate = rl.preflight(opportunity=None, state=rl.RiskState())
     _record("clear_restores_ok", gate.decision == "OK", gate.reason)
 
-    # Write drill marker for live-ramp guard freshness check
+    # Restore any pre-existing live HALT that the drill cleared (P0-2 safety).
+    if prior_halt_active:
+        rl.halt_set(prior_halt_reason or "restored after drill")
+
+    # Write drill marker for live-ramp guard freshness check.
     drill_log = config.LOG_DIR / "drill_runs.jsonl"
     drill_log.parent.mkdir(parents=True, exist_ok=True)
     from datetime import datetime, timezone
@@ -530,6 +544,7 @@ def run_drill_endpoint():
         "ts": datetime.now(timezone.utc).isoformat(),
         "checks": checks,
         "passed": all(c["ok"] for c in checks),
+        "prior_halt_restored": prior_halt_active,
     })
 
     return jsonify({

@@ -117,6 +117,14 @@ class BybitLegExecutor:
         self._assert_withdrawal_disabled()
 
     def _assert_withdrawal_disabled(self) -> None:
+        """Probe the API key's permissions; refuse to start if Withdraw is set.
+
+        SAFETY (regression for P0-3 2026-05-11): on MAINNET, ANY exception
+        from the probe (network timeout, ccxt parse error, auth error) must
+        raise — NOT log-and-continue. A transient blip pre-fix would let a
+        withdrawal-capable key proceed silently. TESTNET keeps the
+        warn-and-continue policy because the consequence is bounded.
+        """
         try:
             info = self._client.privateGetV5UserQueryApi()  # type: ignore
             perms = info.get("result", {}).get("permissions", {})
@@ -129,7 +137,14 @@ class BybitLegExecutor:
         except RuntimeError:
             raise
         except Exception as e:
-            log.warning("withdrawal-perm probe failed (continuing): %s", e)
+            if self.mode == config.MODE_MAINNET:
+                raise RuntimeError(
+                    f"Bybit MAINNET withdrawal-perm probe threw unexpectedly — "
+                    f"REFUSED to start without proof key cannot withdraw: "
+                    f"{type(e).__name__}: {e}"
+                ) from e
+            log.warning("withdrawal-perm probe failed (continuing on %s): %s",
+                        self.mode, e)
 
     # ------------------------------------------------------------------
 
