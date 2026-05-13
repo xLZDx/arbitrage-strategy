@@ -51,11 +51,10 @@ class Fill:
 
     def __post_init__(self) -> None:
         """P3-D5 (2026-05-11): enforce invariants the type system can't.
-        - filled_qty_usd <= requested_qty_usd * 1.05 (5% overfill tolerance
-          for exchange rounding; anything beyond that is a bug).
-        - status='filled' requires avg_price > 0 (defensive error paths
-          used to allow avg_price=0 with status=filled, corrupting downstream
-          PnL math)."""
+        Post-fix re-review (2026-05-11): SHADOW mode constructs synthetic
+        fills using last_price which CAN be None/0 in early-startup
+        scenarios; we treat status='shadow' as the canonical SHADOW marker
+        and only enforce avg_price>0 on LIVE 'filled' status."""
         if self.requested_qty_usd < 0:
             raise ValueError(f"requested_qty_usd must be >= 0, got {self.requested_qty_usd}")
         if self.filled_qty_usd < 0:
@@ -66,9 +65,13 @@ class Fill:
                 f"overfill: filled_qty_usd={self.filled_qty_usd} > 105% of "
                 f"requested {self.requested_qty_usd}"
             )
+        # LIVE 'filled' status REQUIRES a positive price (downstream PnL math
+        # would otherwise divide-or-multiply against 0). SHADOW uses status
+        # 'shadow' for synthetic fills and can have avg_price=0 legitimately.
         if self.status == "filled" and self.avg_price <= 0:
             raise ValueError(
-                f"status='filled' requires avg_price > 0, got {self.avg_price}"
+                f"LIVE status='filled' requires avg_price > 0, got {self.avg_price}. "
+                f"For SHADOW synthetic fills use status='shadow' instead."
             )
 
     @property

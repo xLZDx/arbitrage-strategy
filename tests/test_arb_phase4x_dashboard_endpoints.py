@@ -46,12 +46,19 @@ def _cleanup():
 def setup_function(_):
     rl.halt_clear()
     _cleanup()
+    # M-4 (2026-05-11): clear in-process rate-limiter state so tests that hit
+    # the same endpoint twice (e.g. counterfactual maker vs taker) don't trip
+    # the cooldown gate added in src/dashboard/arb_blueprint.py.
+    from src.dashboard import arb_blueprint as bp
+    bp._LAST_CALLS.clear()
 
 
 def teardown_function(_):
     rl.halt_clear()
     _cleanup()
     os.environ.pop("ARB_PREFER_MAKER", None)
+    from src.dashboard import arb_blueprint as bp
+    bp._LAST_CALLS.clear()
 
 
 def _client():
@@ -177,9 +184,14 @@ def test_counterfactual_known_good_math() -> None:
 def test_counterfactual_taker_fees_eliminate_borderline_go() -> None:
     """20 bps gross spread — clears maker cost stack (~12 bps) but
     NOT taker cost stack (~21 bps). Counterfactual must reflect that."""
+    from src.dashboard import arb_blueprint as bp
     _seed_opportunity(spread_bps=20.0, notional_usd=50.0)
     r_maker = _client().post("/api/arb/counterfactual",
                               json={"bybit_fee_bps": 1.0}).get_json()
+    # M-4: rate-limiter blocks the second call to the same endpoint within
+    # cooldown. Clear the recorded timestamp so this test exercises BOTH
+    # fee regimes back-to-back.
+    bp._LAST_CALLS.pop("/api/arb/counterfactual", None)
     r_taker = _client().post("/api/arb/counterfactual",
                               json={"bybit_fee_bps": 10.0}).get_json()
     assert r_maker["n_go"] >= 1

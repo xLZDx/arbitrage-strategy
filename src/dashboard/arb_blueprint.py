@@ -24,7 +24,9 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 import time
+from functools import wraps
 from pathlib import Path
 
 from flask import Blueprint, jsonify, request
@@ -35,6 +37,47 @@ from src.utils import config, safe_json
 log = logging.getLogger(__name__)
 
 bp = Blueprint("arb", __name__, url_prefix=config.DASHBOARD_API_PREFIX)
+
+# --- M-4 rate-limiting (2026-05-11, security-reviewer re-review) ----------
+# In-process token-bucket-lite for expensive POSTs. Pure stdlib, no
+# flask-limiter dep. Per-route cooldown gate keeps an authenticated but
+# misbehaving caller (or a runaway script) from queueing up dozens of
+# concurrent train_histgbt / counterfactual jobs and DoS-ing the box.
+# A single lock guards _LAST_CALLS so concurrent requests can't both pass
+# the gate simultaneously.
+_RATE_LOCK = threading.Lock()
+_LAST_CALLS: dict[str, float] = {}
+
+
+def _rate_limited(cooldown_s: float):
+    """Decorator: reject if the same route was hit within `cooldown_s`.
+
+    Returns 429 with retry_after when blocked. Cooldown is per-route,
+    process-global — the dashboard is single-process so this is enough
+    to stop a hot-loop client. If the deployment ever goes multi-process
+    behind a load balancer, swap this for flask-limiter with a Redis
+    backend; the route-level decorator API stays the same.
+    """
+    def decorator(fn):
+        @wraps(fn)
+        def wrapper(*args, **kwargs):
+            key = request.path
+            now = time.monotonic()
+            with _RATE_LOCK:
+                last = _LAST_CALLS.get(key, 0.0)
+                elapsed = now - last
+                if elapsed < cooldown_s:
+                    retry_after = round(cooldown_s - elapsed, 2)
+                    return jsonify({
+                        "error": "rate_limited",
+                        "detail": f"endpoint {key} cooldown {cooldown_s}s "
+                                   f"not elapsed (retry_after={retry_after}s)",
+                        "retry_after_s": retry_after,
+                    }), 429
+                _LAST_CALLS[key] = now
+            return fn(*args, **kwargs)
+        return wrapper
+    return decorator
 
 
 def _is_ingestion_running() -> tuple[bool, int | None]:
@@ -341,6 +384,7 @@ def soak_summary():
 
 
 @bp.route("/run_replay", methods=["POST"])
+@_rate_limited(cooldown_s=5.0)
 def run_replay_endpoint():
     """Runs the replay simulator server-side and returns aggregate results."""
     import random
@@ -395,6 +439,7 @@ def run_replay_endpoint():
 
 
 @bp.route("/train_histgbt", methods=["POST"])
+@_rate_limited(cooldown_s=30.0)
 def train_histgbt_endpoint():
     """Train HistGBT on captured opportunities + sim_trades, save artifact."""
     import numpy as np
@@ -459,6 +504,7 @@ def train_histgbt_endpoint():
 
 
 @bp.route("/run_drill", methods=["POST"])
+@_rate_limited(cooldown_s=10.0)
 def run_drill_endpoint():
     """Risk drill — equivalent to scripts/risk_drill.py, returns 8 check results.
 
@@ -600,6 +646,7 @@ def maker_mode_endpoint():
 
 
 @bp.route("/counterfactual", methods=["POST"])
+@_rate_limited(cooldown_s=5.0)
 def counterfactual_endpoint():
     """Re-evaluate captured opportunities with different fee/notional assumptions.
 

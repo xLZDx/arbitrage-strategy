@@ -26,14 +26,27 @@ from src.ml.hist_gbt import save_artifact, train_histgbt
 from src.storage import arb_store
 
 
-def _load_training_pairs() -> tuple[list[dict], list[int], list[str]]:
+def _load_training_pairs(
+    drop_inv_rejected: bool = True,
+) -> tuple[list[dict], list[int], list[str], dict]:
     """
     Join opportunities with sim_trades by (ts, pair) — labels come from
     realized PnL of replayed trades.
+
+    HIGH-4 fix (2026-05-11, ml-engineer re-review): inventory-rejected or
+    unfilled rows are DROPPED from the training set when drop_inv_rejected=True
+    (default). Including them as label=0 confounds the model: the trade never
+    executed, so its outcome is undefined. Treating "didn't fire" as "would have
+    lost" teaches a spurious decision rule (e.g. "predict 0 when inventory is
+    low"). Drop them; the model should only learn from trades that actually
+    ran. Set drop_inv_rejected=False to reproduce pre-fix behavior for audit.
+
+    Returns: (opps, labels, timestamps, stats) where stats reports dropped row
+    counts for observability.
     """
     if not arb_store.table_exists("opportunities") or \
        not arb_store.table_exists("sim_trades"):
-        return [], [], []
+        return [], [], [], {"total": 0, "dropped_inv_rejected": 0, "dropped_unfilled": 0, "kept": 0}
 
     opp_glob = (arb_store.table_dir("opportunities") / "**" / "*.parquet").as_posix()
     sim_glob = (arb_store.table_dir("sim_trades") / "**" / "*.parquet").as_posix()
@@ -56,12 +69,29 @@ def _load_training_pairs() -> tuple[list[dict], list[int], list[str]]:
             "expected_net_bps", "notional_usd",
             "realized_pnl_usd", "inventory_ok", "fill_pct")
     opps, labels, timestamps = [], [], []
+    dropped_inv = 0
+    dropped_unfilled = 0
     for r in rows:
         d = dict(zip(keys, r))
+        inv_ok = bool(d.get("inventory_ok", False))
+        fill_pct = float(d.get("fill_pct", 0.0))
+        if drop_inv_rejected:
+            if not inv_ok:
+                dropped_inv += 1
+                continue
+            if fill_pct <= 0:
+                dropped_unfilled += 1
+                continue
         opps.append(d)
         labels.append(label_from_sim_trade(d))
         timestamps.append(d["ts"])
-    return opps, labels, timestamps
+    stats = {
+        "total": len(rows),
+        "dropped_inv_rejected": dropped_inv,
+        "dropped_unfilled": dropped_unfilled,
+        "kept": len(opps),
+    }
+    return opps, labels, timestamps, stats
 
 
 def main() -> int:
@@ -72,7 +102,12 @@ def main() -> int:
     p.add_argument("--learning-rate", type=float, default=0.05)
     args = p.parse_args()
 
-    opps, labels, ts = _load_training_pairs()
+    opps, labels, ts, stats = _load_training_pairs()
+    if stats["total"] > 0:
+        print(f"Filter stats: total={stats['total']}, "
+              f"dropped_inv_rejected={stats['dropped_inv_rejected']}, "
+              f"dropped_unfilled={stats['dropped_unfilled']}, "
+              f"kept={stats['kept']}")
     if not opps:
         print("No training pairs found. Run ingestion + replay first.")
         print("  1. ./restart_all.ps1                    # capture opportunities")

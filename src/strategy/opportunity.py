@@ -180,10 +180,31 @@ def detect_opportunity(
     cancellation_rate: float,
     gas_total_gwei: float,
     pool_fee_bps: float,
-    notional_usd: float = config.BANKROLL_PER_SIDE_USD * config.PER_TRADE_CAP_PCT / 100.0,
+    notional_usd: float | None = None,
     eth_price_usd: float = ETH_PRICE_USD_FALLBACK,
     bybit_fee_bps: float | None = None,
 ) -> Opportunity:
+    """
+    Post-fix P2-J (2026-05-11): `notional_usd` defaults to None and is
+    computed at CALL time from current config. Pre-fix the default was
+    evaluated at module-import time, so a test that set
+    ARB_BANKROLL_USD env var after import would be ignored.
+
+    Post-fix P0-B-partial (2026-05-11): `pool_fee_bps` now has a runtime
+    guard that raises ValueError if a value >= 100 is passed. Real DEX
+    fees are 1-100 bps. Anything higher screams "raw Uniswap fee tier
+    passed as bps" — the exact 100x bug we caught earlier.
+    """
+    if notional_usd is None:
+        notional_usd = (config.BANKROLL_PER_SIDE_USD
+                         * config.PER_TRADE_CAP_PCT / 100.0)
+    if pool_fee_bps >= 100:
+        raise ValueError(
+            f"pool_fee_bps={pool_fee_bps} looks like a raw Uniswap fee tier "
+            f"(500/3000/10000), not actual bps. Real DEX fees are < 100 bps. "
+            f"Either divide by 100 at the callsite or use "
+            f"PoolConfig.fee_bps_actual property. See 2026-05-11 100x cost bug."
+        )
     """
     bybit_fee_bps: override the Bybit fee used in cost calc. Defaults to
     BYBIT_MAKER_FEE_BPS if config.PREFER_MAKER else BYBIT_TAKER_FEE_BPS.

@@ -54,16 +54,60 @@ class HeuristicTftProvider:
     Cheap, dependency-free stand-in: log-return over the trailing window.
     Not a real TFT, but lets Phase 7 demonstrate non-zero feature values
     without loading PyTorch. Real model lands in SisterProjectTftProvider.
+
+    HIGH-7 fix (2026-05-11, ml-engineer re-review): the canonical method
+    is `trailing_logreturn` — that's what this actually computes. The
+    `predict_60s` method is retained ONLY to satisfy the TftProvider
+    Protocol and delegates to `trailing_logreturn` with a logged warning
+    on first use. Treating trailing-return as a forward forecast in
+    feature-importance studies will mislead — the column is a momentum
+    proxy, not a prediction.
     """
     window: int = 30  # samples
+    _warned: bool = False
 
-    def predict_60s(self, pair: str, recent_mids: Sequence[float]) -> float:
+    def trailing_logreturn(self, pair: str, recent_mids: Sequence[float]) -> float:
+        """
+        Log-return over the trailing `window` samples (BACKWARD-LOOKING).
+        Returns 0.0 when:
+          - fewer than 2 samples available
+          - first sample <= 0 (corrupt input)
+        Invariant: |result| < 1.0 (a 60-sample window with |logret| >= 1
+        implies >2.7x price move — almost certainly a data error or
+        non-monotonic timestamp; assert refuses that input).
+        """
         if len(recent_mids) < 2:
             return 0.0
         head = recent_mids[-min(self.window, len(recent_mids)):]
         if head[0] <= 0:
             return 0.0
-        return float(np.log(head[-1] / head[0]))
+        result = float(np.log(head[-1] / head[0]))
+        # Invariant: heuristic feature must stay in a sane band so downstream
+        # standardisation doesn't blow up on a single corrupt row.
+        assert -1.0 < result < 1.0, (
+            f"trailing_logreturn out of sane band: {result:.4f} "
+            f"(window={len(head)}, head[0]={head[0]:.6f}, head[-1]={head[-1]:.6f}) "
+            f"— refusing potentially corrupt input"
+        )
+        return result
+
+    def predict_60s(self, pair: str, recent_mids: Sequence[float]) -> float:
+        """Protocol-satisfying alias for `trailing_logreturn`.
+
+        WARNING: this is NOT a forward forecast. It returns the trailing
+        log-return. Kept only so HeuristicTftProvider can stand in for a
+        real TftProvider during Phase 7 development. Use
+        `trailing_logreturn` directly in new code to make the semantics
+        explicit.
+        """
+        if not self._warned:
+            log.warning(
+                "HeuristicTftProvider.predict_60s called — this returns TRAILING "
+                "log-return, NOT a forward forecast. Treat the feature as a "
+                "momentum proxy. Future call sites should use trailing_logreturn."
+            )
+            self._warned = True
+        return self.trailing_logreturn(pair, recent_mids)
 
 
 class SisterProjectTftProvider:

@@ -545,16 +545,23 @@ def create_app() -> Flask:
     app.register_blueprint(arb_bp)
 
     # P1-1 SAFETY (2026-05-11): require X-API-Key header on state-mutating
-    # POST endpoints when ARB_API_KEY is configured. GET routes stay open
-    # (read-only). When the key is unset, log a startup warning but allow
+    # POST endpoints AND on sensitive GET endpoints when ARB_API_KEY is
+    # configured. When the key is unset, log a startup warning but allow
     # all requests (localhost dev mode). Mirrors trading-bot dashboard pattern.
+    #
+    # POST-fix re-review NEW-4 (2026-05-11): /zombies + /correctness GETs
+    # leak process info + endpoint topology. Added to gated path explicitly.
+    GATED_GETS = {"/api/arb/zombies", "/api/arb/correctness",
+                   "/api/arb/tft_eta", "/api/arb/maker_mode"}
+
     @app.before_request
     def _enforce_api_key():
         from flask import request, jsonify
-        if request.method == "GET":
+        # Gate: every POST + the GATED_GETS list. Other GETs (spreads,
+        # health, etc.) stay open for the dashboard UI.
+        is_gated = (request.method != "GET") or (request.path in GATED_GETS)
+        if not is_gated:
             return None
-        # Allow specific GET-equivalent POSTs that just read data; keep
-        # state-mutating ones gated.
         api_key = os.environ.get("ARB_API_KEY")
         if not api_key:
             return None  # dev mode — no key configured, allow all

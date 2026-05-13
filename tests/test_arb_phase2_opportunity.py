@@ -109,8 +109,13 @@ def _kwargs(**overrides):
 
 
 def test_detect_returns_opportunity_record() -> None:
-    op = detect_opportunity(**_kwargs())
-    assert isinstance(op, Opportunity)
+    # Re-import locally: sibling tests (test_arb_personal_use_extensions.py)
+    # call importlib.reload(opp_mod) which mints a fresh Opportunity class.
+    # Holding the module-level import here makes isinstance() flaky in
+    # full-suite ordering. The local rebind ALWAYS uses the current class.
+    from src.strategy.opportunity import Opportunity as _Opp, detect_opportunity as _do
+    op = _do(**_kwargs())
+    assert isinstance(op, _Opp)
     assert op.pair == "BTCUSDT"
 
 
@@ -118,11 +123,19 @@ def test_detect_returns_opportunity_record() -> None:
 
 
 def test_pool_fee_raw_tier_500_passed_as_bps_skips_everything() -> None:
-    """REGRESSION for the 2026-05-11 100x dex_fee bug.
-    Uniswap V3 raw fee tier 500 means 0.05% = 5 bps. If a future caller
-    passes 500 directly into detect_opportunity (treating it as bps), the
-    cost stack inflates by ~100x and every spread gets SKIP-negative_after_costs.
-    Production callers (detector_main.py) MUST convert via cfg.fee_bps / 100.0."""
+    """REGRESSION for the 2026-05-11 100x dex_fee bug — now stronger.
+
+    Pre-fix: raw tier 500 silently inflated cost stack to ~516 bps and made
+    every opportunity SKIP-negative_after_costs. That was the "soft" defense:
+    audit later via persisted record.
+
+    Post P0-B (2026-05-11): detect_opportunity now hard-raises ValueError
+    on pool_fee_bps>=100. The mis-call is REJECTED at the call site instead
+    of silently flowing through. Updated contract: 500 must NOT produce an
+    Opportunity record at all.
+    """
+    import pytest
+
     # Clear-profit spread (~100 bps gross) that would normally GO at 5 bps fee
     op_correct = detect_opportunity(**_kwargs(dex_mid=79200.0, pool_fee_bps=5.0))
     assert op_correct.decision == "GO", (
@@ -131,32 +144,26 @@ def test_pool_fee_raw_tier_500_passed_as_bps_skips_everything() -> None:
         f"expected_net_bps={op_correct.expected_net_bps}"
     )
 
-    # SAME spread, but caller forgot to convert: passes 500 as bps directly
-    op_wrong = detect_opportunity(**_kwargs(dex_mid=79200.0, pool_fee_bps=500.0))
-    assert op_wrong.decision == "SKIP", (
-        f"Raw V3 fee tier 500 passed as bps MUST SKIP (cost ~516 bps > gross 100 bps); "
-        f"got GO with expected_net_bps={op_wrong.expected_net_bps}. "
-        f"This is the exact pre-fix bug — regression detected."
-    )
-    assert op_wrong.dex_fee_bps == 500.0, (
-        "The inflation should be visible in the persisted record so audit "
-        "tools can detect the mis-call after the fact."
-    )
-    # The bug is invisible in the SKIP reason if we don't surface it explicitly;
-    # but the magnitude is detectable: cost-after-fee should exceed gross.
-    cost_total = (op_wrong.bybit_fee_bps + op_wrong.dex_fee_bps
-                  + op_wrong.gas_cost_bps + op_wrong.slippage_haircut_bps)
-    assert cost_total > op_wrong.gross_bps, (
-        f"With raw tier as bps, total cost ({cost_total:.1f}) MUST exceed "
-        f"gross ({op_wrong.gross_bps:.1f}) — that's the bug signature."
-    )
+    # SAME spread, but caller forgot to convert: passes 500 as bps directly.
+    # Post-fix this raises ValueError before any record is produced.
+    with pytest.raises(ValueError, match="raw Uniswap fee tier"):
+        detect_opportunity(**_kwargs(dex_mid=79200.0, pool_fee_bps=500.0))
 
 
 def test_pool_fee_3000_raw_tier_also_blocked() -> None:
-    """The 0.30% tier (3000 raw) similarly explodes the cost stack if mis-passed."""
+    """The 0.30% tier (3000 raw) similarly trips the guard.
+
+    Pre-fix: 3000 silently inflated cost stack and made expected_net_bps
+    negative. Post P0-B: hard ValueError before any record is produced.
+    The 30-bps valid call (raw 3000 / 100) must still produce a record;
+    only the bare raw tier 3000 is rejected.
+    """
+    import pytest
+
     op_correct = detect_opportunity(**_kwargs(dex_mid=79200.0, pool_fee_bps=30.0))
-    op_wrong = detect_opportunity(**_kwargs(dex_mid=79200.0, pool_fee_bps=3000.0))
-    assert op_correct.expected_net_bps > op_wrong.expected_net_bps + 2000
+    assert op_correct.pair == "BTCUSDT"
+    with pytest.raises(ValueError, match="raw Uniswap fee tier"):
+        detect_opportunity(**_kwargs(dex_mid=79200.0, pool_fee_bps=3000.0))
 
 
 def test_detector_main_does_the_fee_conversion() -> None:
