@@ -97,7 +97,7 @@ def _load_training_pairs(
 def main() -> int:
     p = argparse.ArgumentParser(description="Train HistGBT")
     p.add_argument("--threshold", type=float, default=0.55,
-                   help="Veto threshold (model.predict_proba < this → REJECT)")
+                   help="Veto threshold (model.predict_proba < this -> REJECT)")
     p.add_argument("--n-estimators", type=int, default=200)
     p.add_argument("--learning-rate", type=float, default=0.05)
     args = p.parse_args()
@@ -114,7 +114,7 @@ def main() -> int:
         print("  2. python scripts/run_replay.py --write # produce sim_trades")
         return 1
     if len(opps) < 20:
-        print(f"Only {len(opps)} training samples — need >= 20.")
+        print(f"Only {len(opps)} training samples -- need >= 20.")
         print("Soak longer (more opportunities) or generate synthetic data.")
         return 1
 

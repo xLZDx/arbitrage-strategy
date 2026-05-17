@@ -575,7 +575,7 @@ def create_app() -> Flask:
 
     if not os.environ.get("ARB_API_KEY"):
         log.warning(
-            "ARB_API_KEY not set — dashboard POSTs are unauthenticated. "
+            "ARB_API_KEY not set -- dashboard POSTs are unauthenticated. "
             "Set ARB_API_KEY in .env for any exposed deployment."
         )
 

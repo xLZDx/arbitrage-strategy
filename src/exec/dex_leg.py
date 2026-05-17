@@ -149,7 +149,7 @@ class DexLegExecutor:
                            else pool_cfg.quote_address)
         if not (token_in_addr and token_out_addr):
             raise RuntimeError(
-                f"PoolConfig for {pair} missing token addresses — "
+                f"PoolConfig for {pair} missing token addresses -- "
                 "extend src/data/dex_quote.py:PILOT_POOLS"
             )
 

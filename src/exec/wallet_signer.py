@@ -77,7 +77,7 @@ class WalletSigner:
             if self.mode == config.MODE_MAINNET and os.environ.get("ARB_MAINNET_GATE") != "1":
                 raise RuntimeError(
                     "WalletSigner refused MAINNET sign: ARB_MAINNET_GATE=1 not set. "
-                    "This is a deliberate second-defense flag — set it explicitly."
+                    "This is a deliberate second-defense flag -- set it explicitly."
                 )
             from eth_account import Account  # type: ignore
             priv = os.environ.get(self.private_key_env)

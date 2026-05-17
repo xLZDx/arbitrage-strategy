@@ -118,7 +118,7 @@ class BybitLegExecutor:
         if os.environ.get("ARB_MAINNET_GATE") != "1":
             raise RuntimeError(
                 "Mainnet execution refused: ARB_MAINNET_GATE=1 not set. "
-                "This is a deliberate second-defense flag — set it explicitly."
+                "This is a deliberate second-defense flag -- set it explicitly."
             )
 
     def _init_client(self) -> None:
@@ -157,7 +157,7 @@ class BybitLegExecutor:
             wallet = perms.get("Wallet", []) or []
             if "Withdraw" in wallet:
                 raise RuntimeError(
-                    f"Bybit {self.mode} API key has Withdraw permission — REFUSED. "
+                    f"Bybit {self.mode} API key has Withdraw permission -- REFUSED. "
                     "Disable withdrawals on this key at exchange level."
                 )
         except RuntimeError:
@@ -165,7 +165,7 @@ class BybitLegExecutor:
         except Exception as e:
             if self.mode == config.MODE_MAINNET:
                 raise RuntimeError(
-                    f"Bybit MAINNET withdrawal-perm probe threw unexpectedly — "
+                    f"Bybit MAINNET withdrawal-perm probe threw unexpectedly -- "
                     f"REFUSED to start without proof key cannot withdraw: "
                     f"{type(e).__name__}: {e}"
                 ) from e

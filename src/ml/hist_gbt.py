@@ -153,7 +153,7 @@ def train_histgbt(
         log.error(
             "PurgedKFold walk-forward produced a single-class fold "
             "(train classes=%s, holdout classes=%s). Refusing to fall back "
-            "to random shuffle — that would inject look-ahead bias. Fix: "
+            "to random shuffle -- that would inject look-ahead bias. Fix: "
             "capture more diverse data (mix of GO/SKIP, longer time span).",
             set(y_tr.tolist()), set(y_hd.tolist()),
         )
@@ -266,7 +266,7 @@ def load_artifact(path: Path | str | None = None,
             raise RuntimeError(
                 f"artifact integrity check FAILED for {p}: "
                 f"expected SHA-256 {expected[:16]}..., got {actual[:16]}..."
-                " — possible supply-chain attack; refusing joblib.load"
+                " -- possible supply-chain attack; refusing joblib.load"
             )
 
     artifact = joblib.load(p)

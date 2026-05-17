@@ -102,7 +102,7 @@ class HeuristicTftProvider:
         """
         if not self._warned:
             log.warning(
-                "HeuristicTftProvider.predict_60s called — this returns TRAILING "
+                "HeuristicTftProvider.predict_60s called -- this returns TRAILING "
                 "log-return, NOT a forward forecast. Treat the feature as a "
                 "momentum proxy. Future call sites should use trailing_logreturn."
             )
@@ -135,7 +135,7 @@ class SisterProjectTftProvider:
             # from ai_trading_assistance.src.models.tft import load_tft
             # self._model = load_tft(self.weights_path)
             log.info("SisterProjectTftProvider: sister-project TFT loader is "
-                     "Phase 7.X — falling back to silent 0.0 for now.")
+                     "Phase 7.X -- falling back to silent 0.0 for now.")
             self._model = None
         except Exception as e:
             log.warning("TFT load failed (using 0.0 fallback): %s", e)

@@ -128,9 +128,9 @@ class BybitL2Stream:
                     backoff = config.BYBIT_WS_RECONNECT_S  # reset on successful message
                     yield snap
             except (ConnectionClosed, OSError, asyncio.TimeoutError) as e:
-                log.warning("WS connection error: %s — reconnecting in %.1fs", e, backoff)
+                log.warning("WS connection error: %s -- reconnecting in %.1fs", e, backoff)
             except Exception as e:
-                log.exception("WS unexpected error: %s — reconnecting in %.1fs", e, backoff)
+                log.exception("WS unexpected error: %s -- reconnecting in %.1fs", e, backoff)
             finally:
                 self._connected = False
                 for book in self._books.values():
