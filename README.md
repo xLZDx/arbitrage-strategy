@@ -19,6 +19,10 @@ The documented architecture includes Bybit spot-market data, DEX quotes, DuckDB/
 
 Read [core/PLAN.md](core/PLAN.md), [core/ARCHITECTURE.md](core/ARCHITECTURE.md), and [core/RISK.md](core/RISK.md) before executing any strategy. Check `pyproject.toml` for the supported Python environment, local path dependencies, and test tooling.
 
+## Historical research translation
+
+The original [mixed-language arbitrage research notebook](arbitrage.txt) remains unchanged. Its [English translation of the Russian passages](docs/ARBITRAGE_RUSSIAN_PASSAGES_EN_2026-10-10.md) covers Weighted OBI, HistGBT/TFT/DRL proposals, DuckDB/QuestDB notes, and the proposed execution pipeline. It is **historical research**, not implementation evidence or approval to trade.
+
 ## Safety
 
 Treat all outputs as research until independently validated with realistic fees, slippage, latency, and out-of-sample evidence. Do not enable real orders, access live credentials, or claim positive expected value from a backtest alone. Keep live execution off unless separately authorized and approved.
