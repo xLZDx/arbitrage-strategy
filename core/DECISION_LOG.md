@@ -31,3 +31,7 @@ commit: `core/PLAN.md` is a file another concurrent session has actively dirty r
 harness-audit gap. Recorded here rather than silently closed; migrating the bootstrap path to
 `uv sync --frozen` (or exporting a pip-consumable locked artifact) is left to a session actually
 working in this project.
+
+## 2026-10-16 -- SDLC workflow pointer added to CLAUDE.md
+
+Operator request: every project points its sessions to the global skill `sdlc-orchestrator` (virtual scrum team). Change limited to `CLAUDE.md`; no behavior change.

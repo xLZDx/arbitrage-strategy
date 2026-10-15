@@ -92,3 +92,7 @@ execution has always been blocked on operator-supplied `BYBIT_TESTNET_API_KEY` /
 `CLAUDE.md`, `core/PLAN.md`, `.claude/settings.json`, `stop_all.ps1`, `src/dashboard/app_arb.py`
 and one test, plus eight untracked `*.unicode_fix.bak` files. They are leftovers from the
 2026-08-14 workspace migration, not in-flight feature work.
+
+## SDLC workflow (virtual scrum team)
+
+For sprint or feature work in this project use the global skill `sdlc-orchestrator`. It keeps the phase state in `docs/sdlc/STATE.md` and launches the role agents of each phase; artifacts live in `docs/sdlc/`. The global Development Rules v4 still apply (one PR per sprint, tests only after sprint coding, final GPT-PM review before push/PR).
